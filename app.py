@@ -11,10 +11,12 @@ within a chat rather than split per-model.
 
 import base64
 import copy
+import io
 
 import gradio as gr
 import PyPDF2
 from langchain_core.messages import AIMessage, HumanMessage
+from PIL import Image
 
 from graph import compiled_graph
 from llm_setup import DEFAULT_MODEL_ALIASES
@@ -77,7 +79,7 @@ def run_turn(message, file_content, source, model, temperature, chat_no, use_too
     final_state = compiled_graph.get_state(config).values
     image_b64 = final_state.get("image_b64")
     audio_bytes = final_state.get("audio_bytes")
-    image = base64.b64decode(image_b64) if image_b64 else None
+    image = Image.open(io.BytesIO(base64.b64decode(image_b64))) if image_b64 else None
     yield history, image, audio_bytes
 
 
