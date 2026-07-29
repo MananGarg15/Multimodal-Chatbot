@@ -81,4 +81,15 @@ def set_ticket_price(
     return f"The result of your query is {result}"
 
 
+@tool
+def generate_image(prompt: str) -> str:
+    """Generate an image from a text description. Call this any time the
+    user asks you to draw, create, generate, show, or visualize an image -
+    not just for destination-city lookups. Pass the user's description
+    straight through as the prompt."""
+    return f"Image generation requested for: {prompt}"
+
+
 ticket_tools = [get_ticket_price, set_ticket_price]
+image_tools = [generate_image]
+all_tools = ticket_tools + image_tools

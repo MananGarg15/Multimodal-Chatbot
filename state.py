@@ -31,11 +31,18 @@ class ChatState(TypedDict):
     use_tools: bool
     speak_enabled: bool
 
-    # Set by the tools node when set_ticket_price/get_ticket_price fires with a
+    # Set by the tools node whenever set_ticket_price/get_ticket_price fires with a
     # destination_city argument this turn. Reset to None at the start of every
     # turn in prepare_input so a stale city from a previous turn never
     # re-triggers image generation.
     destination_city: Optional[str]
+
+    # The actual prompt generate_image (the graph node) will use. Set by the
+    # tools node from either the new general-purpose generate_image tool call
+    # (the user's own description) or from destination_city (wrapped into a
+    # city-themed prompt) - whichever tool fired. Reset to None every turn in
+    # prepare_input, same reason as destination_city above.
+    image_prompt: Optional[str]
 
     # Outputs consumed by the Gradio UI after a run
     image_b64: Optional[str]

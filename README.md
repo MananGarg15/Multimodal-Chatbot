@@ -31,6 +31,7 @@ python app.py
 | notebook's `talker()` reading `response.executable_ad_data` | `multimodal.py`'s `generate_speech()` reads `response.content` | That attribute doesn't exist; this was a bug in the original notebook (already independently fixed in `chatbot_multimodal.py`). |
 | `callModelGenerator`'s `openai` branch calling `Llms.openRouter` | `llm_setup.py` correctly maps each source to its own client/base_url | Copy-paste bug fix. |
 | TTS built (`talker()`) but never wired into the Gradio pipeline | `generate_speech` is a real graph node, reachable via the `speak_enabled` toggle | Feature was present but dead code before. |
+| Image generation only reachable via the ticket-price tool's `destination_city` side-channel | `tools.py`'s `generate_image` tool lets the model generate an image from any user prompt; `state.image_prompt` (not `destination_city` alone) now drives `generate_image_b64()` | The old `artist()`/notebook flow could only make an image when a flight-price lookup happened to fire; asking "draw me a cat" did nothing. |
 
 ## Known limitations to verify once you have keys/network
 

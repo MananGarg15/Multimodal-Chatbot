@@ -13,13 +13,16 @@ import base64
 from llm_setup import openai_native_client
 
 
-def generate_city_image_b64(city: str) -> str | None:
+def generate_image_b64(prompt: str) -> str | None:
     """Returns a base64 PNG string (not a PIL.Image) so it can live directly
-    in ChatState without extra serialization for the checkpointer."""
-    if not city:
+    in ChatState without extra serialization for the checkpointer. Takes any
+    free-form prompt now - the caller (graph.py) is responsible for building
+    a city-specific prompt for the ticket-tool flow, or passing the user's
+    own description through for the general-purpose image tool."""
+    if not prompt:
         return None
     image_response = openai_native_client.images.generate(
-        prompt=f"Generate an artistic image for {city}",
+        prompt=prompt,
         model="gpt-image-1-mini",
         n=1,
         size="1024x1024",
