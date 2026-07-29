@@ -1,0 +1,8 @@
+langgraph>=0.2
+langchain-core>=0.3
+langchain-openai>=0.2
+openai>=1.40
+gradio>=4.0
+PyPDF2
+Pillow
+python-dotenv
