@@ -24,7 +24,9 @@ Graph shape (as agreed):
                                                      (else) -----------------------------------> END
 """
 
-from langgraph.checkpoint.memory import MemorySaver
+import sqlite3
+
+from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, StateGraph
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
@@ -144,10 +146,13 @@ def build_graph():
     )
     graph.add_edge("generate_speech", END)
 
-    # MemorySaver now, swap for langgraph.checkpoint.sqlite.SqliteSaver later
-    # so chats survive a restart - same upgrade path we discussed for
-    # replacing mSeries.promptList.
-    checkpointer = MemorySaver()
+    # SqliteSaver instead of MemorySaver: chat history now survives a
+    # restart, persisted to a local file instead of living only in process
+    # memory. check_same_thread=False because Gradio serves requests from a
+    # worker-thread pool, not the main thread that opens this connection.
+    conn = sqlite3.connect("chatbot_checkpoints.sqlite", check_same_thread=False)
+    checkpointer = SqliteSaver(conn)
+    checkpointer.setup()  # creates the checkpoint tables on first run; no-op after
     return graph.compile(checkpointer=checkpointer)
 
 

@@ -11,12 +11,10 @@ within a chat rather than split per-model.
 
 import base64
 import copy
-import io
 
 import gradio as gr
 import PyPDF2
 from langchain_core.messages import AIMessage, HumanMessage
-from PIL import Image
 
 from graph import compiled_graph
 from llm_setup import DEFAULT_MODEL_ALIASES
@@ -79,7 +77,7 @@ def run_turn(message, file_content, source, model, temperature, chat_no, use_too
     final_state = compiled_graph.get_state(config).values
     image_b64 = final_state.get("image_b64")
     audio_bytes = final_state.get("audio_bytes")
-    image = Image.open(io.BytesIO(base64.b64decode(image_b64))) if image_b64 else None
+    image = base64.b64decode(image_b64) if image_b64 else None
     yield history, image, audio_bytes
 
 
@@ -90,6 +88,37 @@ def load_chat(chat_num, source, model, temperature, use_tools, speak_enabled):
 def create_new_chat(chat_list):
     chat_list.append(f"Chat{len(chat_list) + 1}")
     return chat_list, len(chat_list)
+
+
+def delete_chat(chat_list, chat_index, current_chat_no):
+    """Removes a chat from the sidebar and clears its persisted thread from
+    the sqlite checkpointer, so a deleted chat doesn't just hide in the UI
+    but come back after a restart. chat_index is 1-based, matching chat_no
+    elsewhere in this file."""
+    chat_list = copy.deepcopy(chat_list)
+    if 0 <= chat_index - 1 < len(chat_list):
+        chat_list.pop(chat_index - 1)
+
+    thread_id = str(chat_index)
+    try:
+        compiled_graph.checkpointer.delete_thread(thread_id)
+    except AttributeError:
+        # Older langgraph versions don't expose delete_thread; the row
+        # disappears from the sidebar either way, this just means the raw
+        # rows linger in the sqlite file until manually cleaned up.
+        pass
+
+    if not chat_list:
+        chat_list = ["Chat1"]
+
+    # If the deleted chat was the one open, or its index no longer exists,
+    # fall back to chat 1 and load its history; otherwise keep the current
+    # chat open untouched.
+    if chat_index == current_chat_no or current_chat_no > len(chat_list):
+        new_chat_no = 1
+        new_history = _history_to_gradio(new_chat_no, None, None, None, None, None)
+        return chat_list, new_chat_no, new_history
+    return chat_list, current_chat_no, gr.skip()
 
 
 def reset_content():
@@ -121,15 +150,22 @@ def build_app():
                 new_chat_btn = gr.Button("New", variant="huggingface", size="sm")
 
                 @gr.render(inputs=[chat_list])
-                def render_chats(chat_list):
+                def render_chats(chat_list_value):
                     with gr.Group():
-                        for i, chat in enumerate(chat_list):
+                        for i, chat in enumerate(chat_list_value):
                             chat_num = gr.State(i + 1)
-                            btn = gr.Button(chat, size="lg", variant="stop")
+                            with gr.Row():
+                                btn = gr.Button(chat, size="lg", variant="stop", scale=4)
+                                del_btn = gr.Button("🗑", size="sm", variant="secondary", scale=1)
                             btn.click(
                                 fn=load_chat,
                                 inputs=[chat_num, source, model_name, temperature, use_tools, speak_enabled],
                                 outputs=[chat_no, chat_history],
+                            )
+                            del_btn.click(
+                                fn=delete_chat,
+                                inputs=[chat_list, chat_num, chat_no],
+                                outputs=[chat_list, chat_no, chat_history],
                             )
 
                 new_chat_btn.click(fn=create_new_chat, inputs=[chat_list], outputs=[chat_list, chat_no])
