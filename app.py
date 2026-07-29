@@ -174,7 +174,7 @@ def build_app():
                         outputs=[source, model_name, model_name_input],
                     )
 
-                    tools_checkbox = gr.Checkbox(label="Enable tools (flight price + image generation)", value=False)
+                    tools_checkbox = gr.Checkbox(label="Enable tools (image generation)", value=False)
                     tools_checkbox.change(fn=lambda t: t, inputs=[tools_checkbox], outputs=[use_tools])
 
                     speak_checkbox = gr.Checkbox(label="Speak replies aloud (TTS)", value=False)

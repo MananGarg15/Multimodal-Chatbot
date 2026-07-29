@@ -4,8 +4,13 @@ Shared graph state for the combined multimodal / multi-chat bot.
 Replaces:
 - Day4LLMCalling/messageSeries.py's mSeries.promptList dict (chat_no -> model -> messages)
   is now handled by LangGraph's checkpointer, keyed by thread_id.
-- The per-call `tool_arguments` / `destination_city` plumbing from tool_calling.py
-  and chatbot_multimodal.py's stream_with_tools() is now just fields on this state.
+- The per-call `tool_arguments` plumbing from tool_calling.py and
+  chatbot_multimodal.py's stream_with_tools() is now just fields on this state.
+
+destination_city has been removed - it only existed to support the
+ticket-price tool's image-generation side-channel, and that tool no longer
+exists. image_prompt (set directly by the generate_image tool) is now the
+only thing that drives image generation.
 """
 
 from typing import Annotated, Optional, TypedDict
@@ -31,17 +36,10 @@ class ChatState(TypedDict):
     use_tools: bool
     speak_enabled: bool
 
-    # Set by the tools node whenever set_ticket_price/get_ticket_price fires with a
-    # destination_city argument this turn. Reset to None at the start of every
-    # turn in prepare_input so a stale city from a previous turn never
-    # re-triggers image generation.
-    destination_city: Optional[str]
-
     # The actual prompt generate_image (the graph node) will use. Set by the
-    # tools node from either the new general-purpose generate_image tool call
-    # (the user's own description) or from destination_city (wrapped into a
-    # city-themed prompt) - whichever tool fired. Reset to None every turn in
-    # prepare_input, same reason as destination_city above.
+    # tools node from the generate_image tool call's `prompt` argument.
+    # Reset to None at the start of every turn in prepare_input so a stale
+    # prompt from a previous turn never re-triggers image generation.
     image_prompt: Optional[str]
 
     # Outputs consumed by the Gradio UI after a run

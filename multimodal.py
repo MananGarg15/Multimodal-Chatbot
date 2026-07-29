@@ -1,11 +1,22 @@
 """
 Replaces artist()/talker() from notebooks/W2D5ImageAudio.ipynb.
 
-Same models (gpt-image-1-mini, gpt-4o-mini-tts) and same behaviour, but:
+Image model: gpt-image-2 (quality="low"), TTS: gpt-4o-mini-tts.
+
+Notes vs. the original notebook code:
 - talker() actually gets wired into the graph now (it existed in the notebook
   but was commented out of the Gradio pipeline).
 - The `response.executable_ad_data` bug is fixed to `response.content`
   (chatbot_multimodal.py already made this same fix independently).
+- images.generate() no longer passes response_format: the GPT image models
+  (gpt-image-1-mini, gpt-image-1.5, gpt-image-2, etc.) don't accept that
+  parameter at all and always return b64_json in response.data[0].b64_json.
+  Passing it causes a 400 "Unknown parameter: 'response_format'" error.
+- Switched from gpt-image-1-mini to gpt-image-2 with quality="low": OpenAI's
+  docs note gpt-image-2 at low quality performs on par with gpt-image-1-mini,
+  but gpt-image-2 is the current flagship model (not on a deprecation
+  timeline the way gpt-image-1 / gpt-image-1.5 are), so this is the more
+  future-proof pick at essentially the same cost.
 """
 
 import base64
@@ -23,10 +34,10 @@ def generate_image_b64(prompt: str) -> str | None:
         return None
     image_response = openai_native_client.images.generate(
         prompt=prompt,
-        model="gpt-image-1-mini",
+        model="gpt-image-2",
+        quality="low",
         n=1,
         size="1024x1024",
-        response_format="b64_json",
     )
     return image_response.data[0].b64_json
 

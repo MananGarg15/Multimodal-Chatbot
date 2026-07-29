@@ -8,6 +8,10 @@ The graph that replaces the entire old architecture:
 - chatbot_multimodal.py's hand-written stream_with_tools() -> now just the
   `agent` node, since ChatOpenAI.stream() + .bind_tools() do both at once
 
+Ticket-price tools (and the destination_city state field they drove) have
+been removed entirely. The only tool left is generate_image, which sets
+image_prompt directly.
+
 Graph shape (as agreed):
 
     prepare_input -> agent <-> tools
@@ -35,9 +39,9 @@ TOOL_MAP = {t.name: t for t in all_tools}
 def prepare_input(state: ChatState) -> dict:
     """Folds uploaded file content into the latest human message, same as
     `message += f'File content: {file_content}'` in chatbot.py/chatbot_multimodal.py.
-    Also resets destination_city/image/audio so a stale value from a previous
+    Also resets image_prompt/image/audio so a stale value from a previous
     turn can't leak into this one."""
-    updates: dict = {"destination_city": None, "image_prompt": None, "image_b64": None, "audio_bytes": None}
+    updates: dict = {"image_prompt": None, "image_b64": None, "audio_bytes": None}
 
     file_content = state.get("file_content", "")
     if file_content:
@@ -83,15 +87,11 @@ def route_after_agent(state: ChatState) -> str:
 
 def call_tools(state: ChatState) -> dict:
     """Custom tool node (rather than langgraph.prebuilt.ToolNode) so we can
-    also lift image_prompt out into state - same trick tool_calling.py's
-    handle_tool_call() + chatbot_multimodal.py's
-    tool_argument.get('destination_city') did, now generalized so either the
-    ticket-price tool (destination_city -> a city-themed prompt) or the new
-    general-purpose generate_image tool (the user's own prompt, untouched)
-    can trigger image generation."""
+    also lift image_prompt out into state for the conditional edge below.
+    Now that the ticket-price tool is gone, generate_image is the only tool,
+    so this simply passes its `prompt` argument straight through."""
     last = state["messages"][-1]
     tool_messages = []
-    destination_city = state.get("destination_city")
     image_prompt = state.get("image_prompt")
 
     for call in last.tool_calls:
@@ -101,11 +101,8 @@ def call_tools(state: ChatState) -> dict:
 
         if call["name"] == "generate_image":
             image_prompt = call["args"].get("prompt")
-        elif call["args"].get("destination_city"):
-            destination_city = call["args"]["destination_city"]
-            image_prompt = f"Generate an artistic image for {destination_city}"
 
-    return {"messages": tool_messages, "destination_city": destination_city, "image_prompt": image_prompt}
+    return {"messages": tool_messages, "image_prompt": image_prompt}
 
 
 def generate_image(state: ChatState) -> dict:
