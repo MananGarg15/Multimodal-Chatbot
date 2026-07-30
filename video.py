@@ -7,7 +7,12 @@ Three tools:
 - search_youtube: Data API v3 search, returns metadata including video_id.
 - extract_youtube_transcript: full transcript text for a specific video_id,
   so the model can actually read/summarize/answer questions about a video's
-  content rather than just its title+description snippet.
+  content rather than just its title+description snippet. The truncated
+  slice returned to the model is capped at char_limit (default 3000), but
+  graph.py's call_tools also ingests the *untruncated* transcript into this
+  chat's RAG store (rag.py) via fetch_transcript() below, the same way an
+  uploaded PDF/TXT gets indexed - so a long video's transcript stays fully
+  queryable via retrieve_context afterward, not just the first ~3000 chars.
 - play_video: the one that actually surfaces something in the UI. Calling
   search_youtube alone does NOT display anything - it just gives the model
   video_ids to choose from (same relationship generate_image's tool call
@@ -130,10 +135,52 @@ def search_youtube(query: str, max_results: int = 10) -> List[Dict[str, Any]]:
     return results
 
 
+def fetch_transcript(video_id: str) -> tuple[str | None, str | None]:
+    """Fetches a video's full, un-truncated transcript once. Returns
+    (full_text, error) - exactly one of the two is None.
+
+    Factored out of extract_youtube_transcript so graph.py's call_tools can
+    also ingest the *full* transcript into this chat's RAG store (rag.py)
+    without hitting the transcript API a second time just to get the
+    untruncated text - the tool below only ever needs a truncated slice
+    for the model's context, but ingestion needs the whole thing."""
+    try:
+        from youtube_transcript_api import YouTubeTranscriptApi
+        from youtube_transcript_api._errors import (
+            TranscriptsDisabled,
+            NoTranscriptFound,
+            VideoUnavailable,
+        )
+    except ImportError:
+        return None, "Error: youtube-transcript-api is not installed."
+
+    try:
+        ytt_api = YouTubeTranscriptApi()
+        try:
+            fetched = ytt_api.fetch(video_id, languages=["en"])
+        except NoTranscriptFound:
+            transcript_list = ytt_api.list(video_id)
+            transcript = next(iter(transcript_list))
+            fetched = transcript.fetch()
+
+        text = " ".join(snippet.text for snippet in fetched)
+        return text, None
+
+    except (TranscriptsDisabled, VideoUnavailable):
+        return None, "Transcript unavailable for this video (disabled by uploader or video unavailable)."
+    except Exception as e:
+        return None, f"Error extracting YouTube transcript: {str(e)}"
+
+
 @tool
 def extract_youtube_transcript(video_id: str, char_limit: int = 3000) -> str:
     """
-    Fetches the full transcript of a YouTube video.
+    Fetches the transcript of a YouTube video and shows you up to
+    char_limit characters of it directly in this turn's context. The full
+    transcript (not just this truncated slice) also gets indexed into this
+    chat's document store, so you can use retrieve_context afterward to
+    search anything beyond what's shown here, rather than needing the
+    whole thing to fit in context at once.
     Use this tool AFTER search_youtube, passing the 'video_id' of a specific video
     you want to read in full rather than just its description. Falls back to a
     "transcript unavailable" message if the video has no transcript (disabled by
@@ -147,32 +194,17 @@ def extract_youtube_transcript(video_id: str, char_limit: int = 3000) -> str:
     Returns:
         The video transcript as plain text, truncated to char_limit.
     """
-    try:
-        from youtube_transcript_api import YouTubeTranscriptApi
-        from youtube_transcript_api._errors import (
-            TranscriptsDisabled,
-            NoTranscriptFound,
-            VideoUnavailable,
-        )
-    except ImportError:
-        return "Error: youtube-transcript-api is not installed."
-
-    try:
-        ytt_api = YouTubeTranscriptApi()
-        try:
-            fetched = ytt_api.fetch(video_id, languages=["en"])
-        except NoTranscriptFound:
-            transcript_list = ytt_api.list(video_id)
-            transcript = next(iter(transcript_list))
-            fetched = transcript.fetch()
-
-        text = " ".join(snippet.text for snippet in fetched)
-        return text[:char_limit]
-
-    except (TranscriptsDisabled, VideoUnavailable):
-        return "Transcript unavailable for this video (disabled by uploader or video unavailable)."
-    except Exception as e:
-        return f"Error extracting YouTube transcript: {str(e)}"
+    full_text, error = fetch_transcript(video_id)
+    if error:
+        return error
+    return full_text[:char_limit]
+    # Note: graph.py's call_tools special-cases this tool by name (same
+    # pattern as play_video) so it can also call rag.ingest_text() with the
+    # *full* transcript from fetch_transcript() above, and inject thread_id
+    # - neither of which this body has access to or should need to. This
+    # implementation is what the schema/docstring get introspected from,
+    # and is a working fallback if that interception is ever bypassed, but
+    # in normal operation call_tools's dispatch is what actually runs.
 
 
 @tool

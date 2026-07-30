@@ -52,7 +52,7 @@ from llm_setup import get_llm
 from multimodal import generate_image_b64, generate_speech
 from state import ChatState
 from tools import all_tools
-from video import extract_video_id, is_embeddable
+from video import extract_video_id, fetch_transcript, is_embeddable
 
 TOOL_MAP = {t.name: t for t in all_tools}
 
@@ -131,7 +131,16 @@ def call_tools(state: ChatState, config: RunnableConfig) -> dict:
     embedding disabled by their uploader and will never play in our
     iframe no matter what, so video_id is only overwritten - and the model
     is only told "Now playing" - when the check confirms it'll actually
-    work."""
+    work.
+
+    extract_youtube_transcript is special-cased for the same underlying
+    reason as retrieve_context: it needs thread_id injected to know which
+    chat's RAG store to write into. video.fetch_transcript() is called
+    directly here (rather than via tool_fn.invoke()) so the *untruncated*
+    transcript is available for rag.ingest_text() - the tool's own body
+    only ever returns a char_limit-truncated slice, which is enough for
+    that turn's model context but would make for a useless, already-
+    truncated RAG index if that's all we ingested."""
     thread_id = config["configurable"]["thread_id"]
     last = state["messages"][-1]
     tool_messages = []
@@ -141,6 +150,26 @@ def call_tools(state: ChatState, config: RunnableConfig) -> dict:
     for call in last.tool_calls:
         if call["name"] == "retrieve_context":
             result = rag.retrieve(thread_id, call["args"].get("query", ""))
+        elif call["name"] == "extract_youtube_transcript":
+            # Special-cased for the same reason play_video is: this needs
+            # thread_id (to know which chat's RAG store to write into) and
+            # the *untruncated* transcript text, neither of which the
+            # tool's own body (video.py) has access to or should need to.
+            resolved = extract_video_id(call["args"].get("video_id", "")) or call["args"].get(
+                "video_id", ""
+            )
+            char_limit = call["args"].get("char_limit", 3000)
+            full_text, error = fetch_transcript(resolved)
+            if error:
+                result = error
+            else:
+                chunk_count = rag.ingest_text(thread_id, f"youtube_{resolved}", full_text)
+                result = full_text[:char_limit]
+                if chunk_count:
+                    result += (
+                        f"\n\n[Full transcript indexed as {chunk_count} chunks in this chat's "
+                        f"document store - use retrieve_context for anything beyond what's shown above.]"
+                    )
         elif call["name"] == "play_video":
             # Don't trust play_video's own return value for this one - it
             # can't know whether the video is actually embeddable, that
