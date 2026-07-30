@@ -1,1 +1,31 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Environment variables / secrets
 .env
+
+# App-generated data (not source)
+chroma_db/
+chatbot_checkpoints.sqlite
+chat_list.json
+
+# Scratch/exploratory notebooks
+temp.ipynb
+
+# IDE
+.vscode/
+.idea/
+
+# OS cruft
+.DS_Store
+Thumbs.db
