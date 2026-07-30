@@ -12,10 +12,6 @@
     "name": "Bye chat"
   },
   {
-    "id": "4",
-    "name": "Tavily chat"
-  },
-  {
     "id": "5",
     "name": "Chat5"
   },
@@ -25,6 +21,6 @@
   },
   {
     "id": "8",
-    "name": "Chat8"
+    "name": "ThisGirlChat"
   }
 ]

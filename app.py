@@ -177,17 +177,18 @@ def run_turn(message, source, model, temperature, chat_id, use_tools, speak_enab
     yield history, image, audio_bytes, _video_html(video_id)
 
 
-def load_chat(chat_id, source, model, temperature, use_tools, speak_enabled):
+def load_chat(chat_id, chat_name, source, model, temperature, use_tools, speak_enabled):
     history = _history_to_gradio(chat_id, source, model, temperature, use_tools, speak_enabled)
-    return chat_id, history, _thread_image(chat_id), _thread_video_html(chat_id)
+    return chat_id, gr.update(value=history, label=chat_name), _thread_image(chat_id), _thread_video_html(chat_id)
 
 
 def create_new_chat(chat_list):
     chat_list = copy.deepcopy(chat_list)
     new_id = chat_store.next_chat_id(chat_list)
-    chat_list.append({"id": new_id, "name": f"Chat{new_id}"})
+    new_name = f"Chat{new_id}"
+    chat_list.append({"id": new_id, "name": new_name})
     chat_store.save_chats(chat_list)
-    return chat_list, new_id
+    return chat_list, new_id, gr.update(value=[], label=new_name), None, _video_html(None)
 
 
 def delete_chat(chat_list, chat_id, current_chat_id):
@@ -213,9 +214,15 @@ def delete_chat(chat_list, chat_id, current_chat_id):
 
     still_exists = any(c["id"] == current_chat_id for c in chat_list)
     if chat_id == current_chat_id or not still_exists:
-        new_chat_id = chat_list[0]["id"]
-        new_history = _history_to_gradio(new_chat_id, None, None, None, None, None)
-        return chat_list, new_chat_id, new_history, _thread_image(new_chat_id), _thread_video_html(new_chat_id)
+        new_chat = chat_list[0]
+        new_history = _history_to_gradio(new_chat["id"], None, None, None, None, None)
+        return (
+            chat_list,
+            new_chat["id"],
+            gr.update(value=new_history, label=new_chat["name"]),
+            _thread_image(new_chat["id"]),
+            _thread_video_html(new_chat["id"]),
+        )
     return chat_list, current_chat_id, gr.skip(), gr.skip(), gr.skip()
 
 
@@ -229,16 +236,21 @@ def cancel_rename():
     return None, gr.update(visible=False)
 
 
-def save_rename(chat_list, chat_id, new_name):
+def save_rename(chat_list, chat_id, new_name, current_chat_id):
     chat_list = copy.deepcopy(chat_list)
     new_name = (new_name or "").strip()
+    label_update = gr.skip()
     if new_name:
         for c in chat_list:
             if c["id"] == chat_id:
                 c["name"] = new_name
                 break
         chat_store.save_chats(chat_list)
-    return chat_list, None, gr.update(visible=False)
+        if chat_id == current_chat_id:
+            # Renamed the chat you're currently looking at - update the
+            # label in place without touching the message list itself.
+            label_update = gr.update(label=new_name)
+    return chat_list, None, gr.update(visible=False), label_update
 
 
 def on_page_load():
@@ -250,9 +262,9 @@ def on_page_load():
     instead of the sidebar reverting to whatever existed when the python
     process first started."""
     chats = chat_store.load_chats()
-    first_id = chats[0]["id"]
-    history = _history_to_gradio(first_id, None, None, None, None, None)
-    return chats, first_id, history, _thread_image(first_id), _thread_video_html(first_id)
+    first = chats[0]
+    history = _history_to_gradio(first["id"], None, None, None, None, None)
+    return chats, first["id"], gr.update(value=history, label=first["name"]), _thread_image(first["id"]), _thread_video_html(first["id"])
 
 
 def reset_content():
@@ -289,19 +301,25 @@ def build_app():
             with gr.Column(scale=1, variant="panel"):
                 new_chat_btn = gr.Button("New", variant="huggingface", size="sm")
 
-                @gr.render(inputs=[chat_list])
-                def render_chats(chat_list_value):
+                @gr.render(inputs=[chat_list, chat_no])
+                def render_chats(chat_list_value, current_chat_id):
                     with gr.Group():
                         for chat in chat_list_value:
                             cid = gr.State(chat["id"])
                             cname = gr.State(chat["name"])
+                            is_active = chat["id"] == current_chat_id
                             with gr.Row():
-                                btn = gr.Button(chat["name"], size="lg", variant="stop", scale=6)
+                                btn = gr.Button(
+                                    chat["name"],
+                                    size="lg",
+                                    variant="primary" if is_active else "secondary",
+                                    scale=6,
+                                )
                                 rename_btn = gr.Button("✏️", size="sm", scale=1, min_width=36)
                                 del_btn = gr.Button("🗑", size="sm", scale=1, min_width=36)
                             btn.click(
                                 fn=load_chat,
-                                inputs=[cid, source, model_name, temperature, use_tools, speak_enabled],
+                                inputs=[cid, cname, source, model_name, temperature, use_tools, speak_enabled],
                                 outputs=[chat_no, chat_history, image_box, video_box],
                             )
                             rename_btn.click(
@@ -315,8 +333,6 @@ def build_app():
                                 outputs=[chat_list, chat_no, chat_history, image_box, video_box],
                             )
 
-                new_chat_btn.click(fn=create_new_chat, inputs=[chat_list], outputs=[chat_list, chat_no])
-
                 # Always present but hidden until a ✏️ is clicked - a single
                 # shared rename bar instead of swapping a row's contents
                 # in-place, so there's always a real textbox on the page
@@ -327,11 +343,6 @@ def build_app():
                     rename_save_btn = gr.Button("✔", size="sm", scale=1, min_width=36)
                     rename_cancel_btn = gr.Button("✕", size="sm", scale=1, min_width=36)
 
-                rename_save_btn.click(
-                    fn=save_rename,
-                    inputs=[chat_list, rename_target, rename_box],
-                    outputs=[chat_list, rename_target, rename_row],
-                )
                 rename_cancel_btn.click(fn=cancel_rename, outputs=[rename_target, rename_row])
 
             with gr.Column(scale=4):
@@ -341,6 +352,24 @@ def build_app():
                     image_box = gr.Image(height=320, interactive=False, show_label=False, label="Generated image")
                     audio_box = gr.Audio(autoplay=True, label="Voice reply")
                     video_box = gr.HTML(_video_html(None), label="Video", min_height=320, container=True)
+
+                # Both wired here rather than right after their buttons'
+                # own definitions above - these .click() calls run eagerly
+                # at build time (unlike the @gr.render closures above,
+                # which are deferred until actual rendering), so they need
+                # chat_history/image_box/video_box to already exist as
+                # Python names in this scope, not just be defined
+                # somewhere later in the function.
+                new_chat_btn.click(
+                    fn=create_new_chat,
+                    inputs=[chat_list],
+                    outputs=[chat_list, chat_no, chat_history, image_box, video_box],
+                )
+                rename_save_btn.click(
+                    fn=save_rename,
+                    inputs=[chat_list, rename_target, rename_box, chat_no],
+                    outputs=[chat_list, rename_target, rename_row, chat_history],
+                )
 
                 with gr.Group():
                     user_input = gr.Textbox(placeholder="Enter your prompt", show_label=False, scale=8)
