@@ -26,6 +26,9 @@ from pathlib import Path
 from langchain_chroma import Chroma
 from langchain_openai import OpenAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from dotenv import load_dotenv
+
+load_dotenv()  # so OPENAI_API_KEY is available to the OpenAIEmbeddings client
 
 _PERSIST_ROOT = Path("chroma_db")
 
