@@ -1,21 +1,53 @@
-# LangGraph combined chatbot
+# Multimodal AI Chatbot
 
-Ports and merges:
-- `Week2LLMFrameworks/chatbot.py` (multi-chat sidebar, streaming, file upload)
-- `chatbot_multimodal.py` (tool-calling -> image gen, TTS)
-- `Day4LLMCalling/*` (the old `Llms` client wrapper, `mSeries`, tool schema/dispatch)
+A multi-provider, tool-using chatbot built on [LangGraph](https://github.com/langchain-ai/langgraph). It streams responses token-by-token while still being able to call tools mid-turn - generating images, reading replies aloud, searching and watching YouTube videos, searching the live web, and answering questions about documents you've uploaded to that chat.
 
-into a single LangGraph app. See `graph.py` for the node/edge design.
+## Features
 
-The ticket-price tools (`get_ticket_price`, `set_ticket_price`, and the
-SQLite `Tables.db` they used) have been removed entirely. `tools.py` now
-pulls together seven tools: `generate_image` (`image_prompt`, set directly
-from the tool call's `prompt` argument, is the only thing driving image
-generation), `retrieve_context` for RAG over uploaded documents (see
-`rag.py`), `web_search` / `fetch_page` for live web search (via Tavily)
-and full-page fetching, and `search_youtube` / `extract_youtube_transcript`
-/ `play_video` (see `video.py`) for finding, reading the transcript of,
-and embedding a YouTube video in the UI.
+- **Four LLM providers** - OpenAI, Gemini, OpenRouter, and local Ollama models, switchable per turn from the UI.
+- **Streaming + tool-calling in one pass** - the agent streams its answer token-by-token and can still decide mid-response to call a tool, loop back with the result, and continue.
+- **Image generation** - ask the bot to draw, generate, or visualize something and it produces an image inline.
+- **Text-to-speech** - toggle "speak replies aloud" to have responses read back to you.
+- **YouTube integration** - search for videos, pull a video's full transcript to answer questions about its content, and load a video directly into an embedded player in the UI.
+- **Live web search** - looks up current information via Tavily and can fetch and read a specific page in full.
+- **Per-chat document Q&A (RAG)** - upload a PDF or TXT file and it's chunked, embedded, and stored in a per-chat vector index (Chroma), so it stays queryable for the rest of that conversation. YouTube transcripts get indexed the same way, so long transcripts remain fully searchable rather than being capped to what fits in one turn.
+- **Multi-chat sidebar** - create, rename, and delete chats; the active chat is highlighted, and the chat panel's title always shows the name of whichever chat is open.
+- **Persistent state** - chat history, generated images, loaded videos, and uploaded documents all survive an app restart.
+
+## Architecture
+
+The chatbot is a single LangGraph state machine (`graph.py`):
+
+```
+prepare_input -> agent <-> tools
+                    |
+                    +-- image requested? --> generate_image --+
+                    |                                          |
+                    +-- (no image) ---------------------------+
+                                                               |
+                                              speak enabled? --> generate_speech --> END
+                                              (else) -----------------------------------> END
+```
+
+- **`agent`** builds the right client for the selected provider, streams the response, and (if tools are enabled) can emit tool calls.
+- **`tools`** dispatches whichever tool the model called - image generation, RAG lookup, web search/page fetch, or the YouTube tools - injecting per-chat context (like `thread_id`) that the model itself never needs to know about.
+- **`generate_image`** / **`generate_speech`** produce the actual image/audio output for that turn, only running when triggered.
+
+State (`state.py`) is checkpointed per chat via a `SqliteSaver` (`chatbot_checkpoints.sqlite`), so each sidebar chat is its own independent thread with its own message history, generated image, loaded video, and uploaded documents.
+
+### Modules
+
+| File | Responsibility |
+|---|---|
+| `app.py` | Gradio UI - chat window, sidebar, settings, file upload |
+| `graph.py` | The LangGraph graph: nodes, routing, checkpointing |
+| `state.py` | Shared graph state schema |
+| `llm_setup.py` | Per-provider chat model client factory |
+| `tools.py` | `generate_image`, `retrieve_context`, `web_search`, `fetch_page` |
+| `video.py` | `search_youtube`, `extract_youtube_transcript`, `play_video` |
+| `multimodal.py` | Image generation and text-to-speech calls |
+| `rag.py` | Per-chat document chunking, embedding, and retrieval (Chroma) |
+| `chat_store.py` | Persists the sidebar's chat list (id + name) to `chat_list.json` |
 
 ## Setup
 
@@ -23,55 +55,48 @@ and embedding a YouTube video in the UI.
 pip install -r requirements.txt
 ```
 
-Same `.env` keys as before, plus two new ones: `GOOGLE_API_KEY`,
-`OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `TAVILY_API_KEY` (for
-`web_search` - get a free key at tavily.com, 1,000 searches/month on the
-free tier), and now `YOUTUBE_API_KEY` (for `search_youtube` - a YouTube
-Data API v3 key from Google Cloud Console; `extract_youtube_transcript`
-and `play_video` don't need it, only `search_youtube` does).
-(`ollama` needs no key, just a running local server on `localhost:11434`.)
+Create a `.env` file with the keys you need:
+
+```
+OPENAI_API_KEY=...      # chat (openai source), image generation, TTS, embeddings - required
+GOOGLE_API_KEY=...      # chat (gemini source)
+OPENROUTER_API_KEY=...  # chat (openRouter source)
+TAVILY_API_KEY=...      # web_search - free tier at tavily.com
+YOUTUBE_API_KEY=...     # search_youtube only (a YouTube Data API v3 key)
+```
+
+`ollama` needs no key, just a running local server on `localhost:11434`. `OPENAI_API_KEY` is required regardless of which provider you're chatting with, since image generation, TTS, and document embeddings always go through OpenAI's API.
+
+Run it:
 
 ```bash
 python app.py
 ```
 
-## What changed vs. the old code, and why
+## Using it
 
-| Old | New | Why |
-|---|---|---|
-| `mSeries.promptList[chat_no][model]` global dict | LangGraph checkpointer, keyed by `thread_id` | Per your decision: one shared history per chat regardless of model switch. Also removes a global mutable dict as the source of truth. |
-| `callModel` (tools, no stream) vs `callModelGenerator` (stream, no tools) | one `agent` node using `ChatOpenAI.bind_tools().stream()` | `.stream()` and `.bind_tools()` compose on the same object in langchain, so there's no more either/or flag. |
-| `tool_calling.py` manual JSON schema + `function_map` + `handle_tool_call` while-loop | `tools.py` `@tool`-decorated functions + `agent <-> tools` conditional-edge loop in `graph.py` | Same dispatch logic, now expressed as graph control flow instead of a while-loop inside the LLM-calling function. |
-| `get_ticket_price` / `set_ticket_price` + `Tables.db` | removed entirely | Not part of the resume project's scope going forward - simplifies `tools.py`, `state.py`, and `graph.py`'s tool-dispatch node. |
-| notebook's `talker()` reading `response.executable_ad_data` | `multimodal.py`'s `generate_speech()` reads `response.content` | That attribute doesn't exist; this was a bug in the original notebook (already independently fixed in `chatbot_multimodal.py`). |
-| `callModelGenerator`'s `openai` branch calling `Llms.openRouter` | `llm_setup.py` correctly maps each source to its own client/base_url | Copy-paste bug fix. |
-| TTS built (`talker()`) but never wired into the Gradio pipeline | `generate_speech` is a real graph node, reachable via the `speak_enabled` toggle | Feature was present but dead code before. |
-| Image generation only reachable via the ticket-price tool's `destination_city` side-channel | `tools.py`'s `generate_image` tool lets the model generate an image from any user prompt; `state.image_prompt` drives `generate_image_b64()` directly | The old `artist()`/notebook flow could only make an image when a flight-price lookup happened to fire; asking "draw me a cat" did nothing. Now that the ticket tool is gone, `image_prompt` is the sole trigger. |
-| `MemorySaver` (in-process only) | `SqliteSaver`, backed by `chatbot_checkpoints.sqlite` | Chat message history now survives an app restart instead of vanishing with the process. |
-| Sidebar chat list was `chat_list = gr.State(["Chat1"])`, position-based ids (`i + 1`) | `chat_store.py` persists `[{"id", "name"}, ...]` to `chat_list.json`, with stable ids that are never reused | Previously the sidebar forgot every chat on restart even though `chatbot_checkpoints.sqlite` still had the histories. Position-based ids also silently pointed rename/delete at the wrong thread after a mid-list delete; stable ids fix that. |
-| Delete was the only per-chat action, plain-width button | Delete (🗑) and rename (✏️) as small icon-width buttons at the end of each chat row | Rename edits the name in place via a small textbox + ✔/✕ confirm, no popup/modal needed. |
-| `run_turn` passed `base64.b64decode(image_b64)` (raw bytes) straight to `gr.Image` | Decoded to a `PIL.Image` via `io.BytesIO` first | `gr.Image` doesn't accept raw bytes - only `np.ndarray`, `PIL.Image`, or a path/string - so raw bytes raised `ComponentProcessingError`. |
-| Uploaded file's raw extracted text was stashed in `state.file_content` and folded into the very next `HumanMessage` only | `app.py`'s `get_file_content` embeds the file into a per-chat Chroma collection (`rag.py`) at upload time; `retrieve_context` (`tools.py`) pulls back relevant chunks per query via `graph.py`'s `call_tools`, which injects the chat's `thread_id` | The old approach only helped for one turn and could blow past the model's context window on a large file. Chunked + embedded retrieval keeps the document queryable for the whole chat and only pulls in what's relevant per question. |
-| No way to answer questions about current events / anything outside training data or uploaded docs | `tools.py`'s `web_search` (Tavily) and `fetch_page` (fetch + extract text from a specific URL via `requests`/`BeautifulSoup`) | Rounds out the tool set per the original plan; both dispatch through the existing generic branch in `call_tools` - no graph changes needed, same as `retrieve_context` needed a routing change but `generate_image` didn't. |
-| No way to find, read, or watch video content | `video.py`'s `search_youtube` (Data API v3), `extract_youtube_transcript` (full transcript text), and `play_video` (sets `state.video_id`, rendered as an embedded `gr.HTML` iframe in `app.py` next to the image/audio boxes) | `search_youtube` alone only gives the model metadata to choose from - `play_video` is the tool that actually surfaces something in the UI, same relationship `generate_image`'s tool call has to `state.image_prompt`. |
-| `image_b64`/`video_id` were one-shot, cleared every turn in `prepare_input` like `audio_bytes` | Both now persist across turns - only overwritten when `generate_image`/`play_video` fires again - and `app.py` reads each thread's current value back on chat switch/delete/page-reload (`_thread_image`, `_thread_video_html`) the same way message history is already restored | A generated image or loaded video staying up only for the one turn that produced it, then vanishing the instant you sent the next message (or disappearing entirely if you switched chats and back), didn't match how the rest of the UI behaves - message history persists per chat, so the visual outputs now do too. `image_prompt` and `audio_bytes` stay one-shot: one's just a trigger, the other's a TTS clip meant to play once. |
+- Pick a **source** and **model** in the settings panel, and a temperature.
+- **Enable tools** to let the model call `generate_image`, `retrieve_context`, `web_search`, `fetch_page`, and the YouTube tools. Off by default means plain chat only.
+- **Speak replies aloud** turns on TTS for that turn's response.
+- Drop a **PDF or TXT** file in to index it for that chat - ask about it afterward and the model will pull in relevant passages automatically.
+- Use the sidebar to start new chats, rename them, or delete them; each has its own independent history, image, video, and document index.
 
-## Known limitations to verify once you have keys/network
+## Known limitations
 
-- Not run end-to-end in this sandbox (no network access, no API keys available here) - the code is written to match your existing patterns and compiles cleanly, but please smoke-test locally before relying on it.
-- Tool-calling support varies by model/source - `ollama`'s default `gpt-oss:20b` and some OpenRouter free models may not reliably emit `tool_calls`; this mirrors a limitation that existed in the old code too.
-- Image generation and TTS always use the native `openai` client (same as the old `artist()`/`talker()`), regardless of which `source` you're chatting with - so those features need `OPENAI_API_KEY` set even if you're chatting via Gemini/OpenRouter/Ollama. Embeddings (`rag.py`, `text-embedding-3-small`) are the same - `OPENAI_API_KEY` is required for file upload/RAG regardless of chat `source`.
-- Per-chat vector data lives in `./chroma_db/<thread_id>/`, alongside `chatbot_checkpoints.sqlite` and `chat_list.json` - back up or `.gitignore` all three the same way.
-- All four tools (`generate_image`, `retrieve_context`, `web_search`, `fetch_page`) are gated behind the same "Enable tools" checkbox - if it's off, the model can't call any of them.
-- `web_search` degrades to a plain "not configured" tool message (rather than erroring) if `TAVILY_API_KEY` is unset - the app still runs fine without it, the model just won't be able to search.
-- `fetch_page`'s HTML-to-text extraction is a basic tag-strip via BeautifulSoup, not a full readability/boilerplate-removal pass - it'll include some nav/sidebar noise on pages `web_search`'s own snippet wouldn't have.
-- `search_youtube` degrades to an `{"error": "YOUTUBE_API_KEY not set..."}` tool result (rather than crashing) if that key is unset - same graceful-degradation pattern as `web_search` without `TAVILY_API_KEY`. `extract_youtube_transcript` and `play_video` don't require that key at all.
-- `extract_youtube_transcript` depends on the video actually having captions available (auto-generated or uploader-provided, in English) - some videos have transcripts disabled entirely, in which case it returns a plain "unavailable" message rather than erroring.
-- `play_video` checks YouTube's oEmbed endpoint (`video.py`'s `is_embeddable`) before setting `video_id` - some uploaders disable embedding entirely (common for music videos, trailers, some news clips), which without this check would silently set `video_id` to something that only ever shows YouTube's own "Video unavailable / Watch on YouTube" fallback in the iframe. Now `call_tools` only claims "Now playing" when the check confirms it, and tells the model to point the user to the YouTube link directly otherwise.
-- Neither the image nor the video panel has an explicit "clear" action - each keeps showing whatever was last generated/loaded in that chat until a new one replaces it. Unlike before, the video panel (`gr.HTML`) is now always visible with a "No video loaded" placeholder rather than disappearing entirely when empty - matches `image_box`'s always-there footprint. A brand-new chat starts with both empty/placeholder, since `image_b64`/`video_id` don't exist in the checkpoint until something sets them.
+- Tool-calling reliability varies by model - `ollama`'s local models and some free OpenRouter models don't always emit proper tool calls.
+- Image generation, TTS, and embeddings always use OpenAI's API regardless of the selected chat provider, so `OPENAI_API_KEY` is required even when chatting via Gemini/OpenRouter/Ollama.
+- Per-chat vector data lives under `./chroma_db/<thread_id>/`, alongside `chatbot_checkpoints.sqlite` and `chat_list.json` - back up or `.gitignore` all three together.
+- `web_search` degrades to a "not configured" message rather than erroring if `TAVILY_API_KEY` is unset; `search_youtube` does the same for `YOUTUBE_API_KEY`. Neither blocks the rest of the app from working.
+- `fetch_page`'s text extraction is a basic tag-strip via BeautifulSoup, not a full readability pass, so it can include some nav/sidebar noise on busier pages.
+- `extract_youtube_transcript` depends on the video actually having captions (auto-generated or uploader-provided, in English); some videos don't and it returns a plain "unavailable" message.
+- `play_video` checks whether a video actually allows embedding before claiming success - some uploaders disable it entirely, in which case the model is told to point the user to the YouTube link directly instead.
+- The generated image and loaded video panels have no explicit "clear" action - each keeps showing whatever was last produced in that chat until a new one replaces it.
+- The graph has no explicit cap on how many times a single turn can bounce between `agent` and `tools` beyond LangGraph's default recursion limit, which will raise rather than degrade gracefully if hit.
 
 ## Possible future work
 
-- Swap `fetch_page`'s bare BeautifulSoup extraction for something closer to Readability.js/`trafilatura` if page noise becomes a real problem.
-- A token-budget check on `retrieve_context`/`web_search` output, rather than the current flat character caps, so results scale with the model's actual context window instead of a fixed number.
-- `.env.example` listing all required keys (`OPENAI_API_KEY`, `GOOGLE_API_KEY`, `OPENROUTER_API_KEY`, `TAVILY_API_KEY`) for a fresh clone.
+- A token-budget-aware cap on `retrieve_context`/`web_search` output instead of the current flat character limits.
+- Swap `fetch_page`'s BeautifulSoup extraction for something closer to Readability.js/`trafilatura` if page noise becomes a real problem.
+- Voice input (speech-to-text), to match the existing voice output.
+- An explicit iteration cap on the agent/tools loop with a graceful fallback message.
+- `.env.example` listing all required keys for a fresh clone.
