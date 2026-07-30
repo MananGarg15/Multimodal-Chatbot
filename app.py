@@ -74,6 +74,31 @@ def _history_to_gradio(thread_id, source, model, temperature, use_tools, speak_e
     return out
 
 
+def _video_html(video_id):
+    """Builds the embedded-player iframe for a given video_id, or an empty
+    string (renders as a blank panel) when there's nothing loaded."""
+    if not video_id:
+        return ""
+    return (
+        f'<iframe width="100%" height="230" '
+        f'src="https://www.youtube.com/embed/{video_id}" '
+        f'title="YouTube video player" frameborder="0" '
+        f'allow="accelerometer; autoplay; clipboard-write; encrypted-media; '
+        f'gyroscope; picture-in-picture; web-share" allowfullscreen></iframe>'
+    )
+
+
+def _thread_video_html(thread_id):
+    """Reads back this thread's persisted video_id (see state.py/graph.py
+    for why video_id, unlike image_b64, survives across turns) so
+    switching to a chat that already had a video loaded shows it again,
+    the same way switching chats already restores message history."""
+    config = {"configurable": {"thread_id": str(thread_id)}}
+    snapshot = compiled_graph.get_state(config)
+    video_id = snapshot.values.get("video_id") if snapshot.values else None
+    return _video_html(video_id)
+
+
 def run_turn(message, source, model, temperature, chat_id, use_tools, speak_enabled, history):
     """Streams the assistant reply token-by-token via stream_mode='messages',
     then yields the finished image/audio once the graph reaches END. This
@@ -100,11 +125,16 @@ def run_turn(message, source, model, temperature, chat_id, use_tools, speak_enab
     for token_chunk, metadata in compiled_graph.stream(inputs, config=config, stream_mode="messages"):
         if metadata.get("langgraph_node") == "agent" and getattr(token_chunk, "content", None):
             history[-1]["content"] += token_chunk.content
-            yield history, None, None
+            # gr.skip() on the video panel during streaming - video_id
+            # persists across turns (see state.py), so there's no "this
+            # turn's video" to show partway through; only the final state
+            # below reflects whatever's actually loaded right now.
+            yield history, None, None, gr.skip()
 
     final_state = compiled_graph.get_state(config).values
     image_b64 = final_state.get("image_b64")
     audio_bytes = final_state.get("audio_bytes")
+    video_id = final_state.get("video_id")
 
     # gr.Image doesn't accept raw bytes - it wants a numpy.ndarray,
     # PIL.Image, or a file path/string. Decoding straight to PIL here
@@ -113,11 +143,12 @@ def run_turn(message, source, model, temperature, chat_id, use_tools, speak_enab
     # type: <class 'bytes'>" ComponentProcessingError.
     image = Image.open(io.BytesIO(base64.b64decode(image_b64))) if image_b64 else None
 
-    yield history, image, audio_bytes
+    yield history, image, audio_bytes, _video_html(video_id)
 
 
 def load_chat(chat_id, source, model, temperature, use_tools, speak_enabled):
-    return chat_id, _history_to_gradio(chat_id, source, model, temperature, use_tools, speak_enabled)
+    history = _history_to_gradio(chat_id, source, model, temperature, use_tools, speak_enabled)
+    return chat_id, history, _thread_video_html(chat_id)
 
 
 def create_new_chat(chat_list):
@@ -153,8 +184,8 @@ def delete_chat(chat_list, chat_id, current_chat_id):
     if chat_id == current_chat_id or not still_exists:
         new_chat_id = chat_list[0]["id"]
         new_history = _history_to_gradio(new_chat_id, None, None, None, None, None)
-        return chat_list, new_chat_id, new_history
-    return chat_list, current_chat_id, gr.skip()
+        return chat_list, new_chat_id, new_history, _thread_video_html(new_chat_id)
+    return chat_list, current_chat_id, gr.skip(), gr.skip()
 
 
 def start_rename(chat_id, chat_name):
@@ -190,7 +221,7 @@ def on_page_load():
     chats = chat_store.load_chats()
     first_id = chats[0]["id"]
     history = _history_to_gradio(first_id, None, None, None, None, None)
-    return chats, first_id, history
+    return chats, first_id, history, _thread_video_html(first_id)
 
 
 def reset_content():
@@ -240,7 +271,7 @@ def build_app():
                             btn.click(
                                 fn=load_chat,
                                 inputs=[cid, source, model_name, temperature, use_tools, speak_enabled],
-                                outputs=[chat_no, chat_history],
+                                outputs=[chat_no, chat_history, video_box],
                             )
                             rename_btn.click(
                                 fn=start_rename,
@@ -250,7 +281,7 @@ def build_app():
                             del_btn.click(
                                 fn=delete_chat,
                                 inputs=[chat_list, cid, chat_no],
-                                outputs=[chat_list, chat_no, chat_history],
+                                outputs=[chat_list, chat_no, chat_history, video_box],
                             )
 
                 new_chat_btn.click(fn=create_new_chat, inputs=[chat_list], outputs=[chat_list, chat_no])
@@ -278,6 +309,7 @@ def build_app():
                 with gr.Row():
                     image_box = gr.Image(height=320, interactive=False, show_label=False, label="Generated image")
                     audio_box = gr.Audio(autoplay=True, label="Voice reply")
+                    video_box = gr.HTML(label="Video")
 
                 with gr.Group():
                     user_input = gr.Textbox(placeholder="Enter your prompt", show_label=False, scale=8)
@@ -287,7 +319,7 @@ def build_app():
                     user_input, source, model_name, temperature,
                     chat_no, use_tools, speak_enabled, chat_history,
                 ]
-                turn_outputs = [chat_history, image_box, audio_box]
+                turn_outputs = [chat_history, image_box, audio_box, video_box]
 
                 submit_btn.click(run_turn, inputs=turn_inputs, outputs=turn_outputs).then(
                     fn=reset_content, outputs=[user_input]
@@ -314,7 +346,7 @@ def build_app():
                         outputs=[source, model_name, model_name_input],
                     )
 
-                    tools_checkbox = gr.Checkbox(label="Enable tools (image generation + document search)", value=False)
+                    tools_checkbox = gr.Checkbox(label="Enable tools (image, video, web search, document search)", value=False)
                     tools_checkbox.change(fn=lambda t: t, inputs=[tools_checkbox], outputs=[use_tools])
 
                     speak_checkbox = gr.Checkbox(label="Speak replies aloud (TTS)", value=False)
@@ -328,7 +360,7 @@ def build_app():
         # this is what actually re-reads chat_list.json each time, unlike
         # the gr.State defaults above which are fixed once at server
         # startup. This is the fix for chats disappearing on refresh.
-        demo.load(fn=on_page_load, outputs=[chat_list, chat_no, chat_history])
+        demo.load(fn=on_page_load, outputs=[chat_list, chat_no, chat_history, video_box])
 
     return demo
 

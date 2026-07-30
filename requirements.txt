@@ -8,6 +8,8 @@ chromadb>=0.5
 tavily-python>=0.5
 beautifulsoup4
 requests
+google-api-python-client>=2.100
+youtube-transcript-api>=0.6
 openai>=1.40
 gradio>=4.0
 PyPDF2

@@ -4,10 +4,11 @@ Replaces Day4LLMCalling/tool_list.py + tool_calling.py.
 Ticket-price tools (get_ticket_price, set_ticket_price, and the SQLite
 Tables.db backing them) have been removed entirely per your instruction.
 Tools are now: generate_image, retrieve_context (RAG over uploaded docs),
-and web_search / fetch_page (live web search + full-page fetch, via
-Tavily). langgraph's call_tools node in graph.py binds and dispatches
-these directly, instead of the old hand-written price_function JSON
-schema + function_map + handle_tool_call() dispatcher.
+web_search / fetch_page (live web search + full-page fetch, via Tavily),
+and search_youtube / extract_youtube_transcript / play_video (video.py).
+langgraph's call_tools node in graph.py binds and dispatches these
+directly, instead of the old hand-written price_function JSON schema +
+function_map + handle_tool_call() dispatcher.
 """
 
 import os
@@ -16,6 +17,8 @@ import requests
 from bs4 import BeautifulSoup
 from langchain_core.tools import tool
 from tavily import TavilyClient
+
+from video import video_tools
 
 _tavily_client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
 
@@ -98,4 +101,4 @@ def fetch_page(url: str) -> str:
     return text[:_MAX_CHARS]
 
 
-all_tools = [generate_image, retrieve_context, web_search, fetch_page]
+all_tools = [generate_image, retrieve_context, web_search, fetch_page] + video_tools

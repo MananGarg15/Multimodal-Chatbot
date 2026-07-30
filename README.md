@@ -9,11 +9,13 @@ into a single LangGraph app. See `graph.py` for the node/edge design.
 
 The ticket-price tools (`get_ticket_price`, `set_ticket_price`, and the
 SQLite `Tables.db` they used) have been removed entirely. `tools.py` now
-has four tools: `generate_image` (`image_prompt`, set directly from the
-tool call's `prompt` argument, is the only thing driving image
+pulls together seven tools: `generate_image` (`image_prompt`, set directly
+from the tool call's `prompt` argument, is the only thing driving image
 generation), `retrieve_context` for RAG over uploaded documents (see
-`rag.py`), and `web_search` / `fetch_page` for live web search (via
-Tavily) and full-page fetching.
+`rag.py`), `web_search` / `fetch_page` for live web search (via Tavily)
+and full-page fetching, and `search_youtube` / `extract_youtube_transcript`
+/ `play_video` (see `video.py`) for finding, reading the transcript of,
+and embedding a YouTube video in the UI.
 
 ## Setup
 
@@ -21,11 +23,13 @@ Tavily) and full-page fetching.
 pip install -r requirements.txt
 ```
 
-Same `.env` keys as before, plus one new one: `GOOGLE_API_KEY`,
-`OPENROUTER_API_KEY`, `OPENAI_API_KEY`, and now `TAVILY_API_KEY` (for
+Same `.env` keys as before, plus two new ones: `GOOGLE_API_KEY`,
+`OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `TAVILY_API_KEY` (for
 `web_search` - get a free key at tavily.com, 1,000 searches/month on the
-free tier). (`ollama` needs no key, just a running local server on
-`localhost:11434`.)
+free tier), and now `YOUTUBE_API_KEY` (for `search_youtube` - a YouTube
+Data API v3 key from Google Cloud Console; `extract_youtube_transcript`
+and `play_video` don't need it, only `search_youtube` does).
+(`ollama` needs no key, just a running local server on `localhost:11434`.)
 
 ```bash
 python app.py
@@ -49,6 +53,7 @@ python app.py
 | `run_turn` passed `base64.b64decode(image_b64)` (raw bytes) straight to `gr.Image` | Decoded to a `PIL.Image` via `io.BytesIO` first | `gr.Image` doesn't accept raw bytes - only `np.ndarray`, `PIL.Image`, or a path/string - so raw bytes raised `ComponentProcessingError`. |
 | Uploaded file's raw extracted text was stashed in `state.file_content` and folded into the very next `HumanMessage` only | `app.py`'s `get_file_content` embeds the file into a per-chat Chroma collection (`rag.py`) at upload time; `retrieve_context` (`tools.py`) pulls back relevant chunks per query via `graph.py`'s `call_tools`, which injects the chat's `thread_id` | The old approach only helped for one turn and could blow past the model's context window on a large file. Chunked + embedded retrieval keeps the document queryable for the whole chat and only pulls in what's relevant per question. |
 | No way to answer questions about current events / anything outside training data or uploaded docs | `tools.py`'s `web_search` (Tavily) and `fetch_page` (fetch + extract text from a specific URL via `requests`/`BeautifulSoup`) | Rounds out the tool set per the original plan; both dispatch through the existing generic branch in `call_tools` - no graph changes needed, same as `retrieve_context` needed a routing change but `generate_image` didn't. |
+| No way to find, read, or watch video content | `video.py`'s `search_youtube` (Data API v3), `extract_youtube_transcript` (full transcript text), and `play_video` (sets `state.video_id`, rendered as an embedded `gr.HTML` iframe in `app.py` next to the image/audio boxes) | `search_youtube` alone only gives the model metadata to choose from - `play_video` is the tool that actually surfaces something in the UI, same relationship `generate_image`'s tool call has to `state.image_prompt`. Unlike every other one-shot output (`image_b64`, `audio_bytes`), `video_id` is deliberately **not** reset per turn in `prepare_input` - a loaded video keeps playing across the rest of the conversation until `play_video` is called again, and it can't leak between chats because state is checkpointed per `thread_id` the same way message history already is. |
 
 ## Known limitations to verify once you have keys/network
 
@@ -59,6 +64,9 @@ python app.py
 - All four tools (`generate_image`, `retrieve_context`, `web_search`, `fetch_page`) are gated behind the same "Enable tools" checkbox - if it's off, the model can't call any of them.
 - `web_search` degrades to a plain "not configured" tool message (rather than erroring) if `TAVILY_API_KEY` is unset - the app still runs fine without it, the model just won't be able to search.
 - `fetch_page`'s HTML-to-text extraction is a basic tag-strip via BeautifulSoup, not a full readability/boilerplate-removal pass - it'll include some nav/sidebar noise on pages `web_search`'s own snippet wouldn't have.
+- `search_youtube` degrades to an `{"error": "YOUTUBE_API_KEY not set..."}` tool result (rather than crashing) if that key is unset - same graceful-degradation pattern as `web_search` without `TAVILY_API_KEY`. `extract_youtube_transcript` and `play_video` don't require that key at all.
+- `extract_youtube_transcript` depends on the video actually having captions available (auto-generated or uploader-provided, in English) - some videos have transcripts disabled entirely, in which case it returns a plain "unavailable" message rather than erroring.
+- The video panel (`gr.HTML` iframe) has no explicit "clear" action yet - a video stays loaded until `play_video` is called again in that same chat. A brand-new chat starts with no video, since its `video_id` doesn't exist in the checkpoint until something sets it.
 
 ## Possible future work
 

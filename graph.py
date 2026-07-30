@@ -9,12 +9,19 @@ The graph that replaces the entire old architecture:
   `agent` node, since ChatOpenAI.stream() + .bind_tools() do both at once
 
 Ticket-price tools (and the destination_city state field they drove) have
-been removed entirely. Tools are now generate_image (sets image_prompt)
-and retrieve_context (RAG lookup against this chat's uploaded documents,
-see rag.py).
+been removed entirely. Tools are now generate_image (sets image_prompt),
+retrieve_context (RAG lookup against this chat's uploaded documents, see
+rag.py), web_search/fetch_page (Tavily), and search_youtube/
+extract_youtube_transcript/play_video (video.py - play_video sets
+video_id).
 
-Graph shape (unchanged since the RAG tool was added - retrieve_context
-slots into the existing agent <-> tools loop, no new nodes/edges needed):
+video_id is the odd one out among these: unlike image_prompt (reset every
+turn in prepare_input below), video_id deliberately persists across turns
+once play_video sets it - see state.py's docstring for why.
+
+Graph shape (unchanged since the RAG/web-search/video tools were added -
+they all slot into the existing agent <-> tools loop, no new nodes/edges
+needed):
 
     prepare_input -> agent <-> tools
                         |
@@ -38,6 +45,7 @@ from llm_setup import get_llm
 from multimodal import generate_image_b64, generate_speech
 from state import ChatState
 from tools import all_tools
+from video import extract_video_id
 
 TOOL_MAP = {t.name: t for t in all_tools}
 
@@ -49,7 +57,12 @@ def prepare_input(state: ChatState) -> dict:
     old approach of folding the entire extracted file text into the next
     HumanMessage is gone. retrieve_context (tools.py) pulls back just the
     relevant chunks per query instead, so there's no file_content field
-    left to consume/clear at this point."""
+    left to consume/clear at this point.
+
+    video_id is deliberately NOT included here - a loaded video should
+    keep playing across the rest of the conversation, not vanish on the
+    next turn the way a generated image does. It's only ever overwritten
+    when play_video fires again (see call_tools below)."""
     return {"image_prompt": None, "image_b64": None, "audio_bytes": None}
 
 
@@ -83,16 +96,25 @@ def route_after_agent(state: ChatState) -> str:
 
 def call_tools(state: ChatState, config: RunnableConfig) -> dict:
     """Custom tool node (rather than langgraph.prebuilt.ToolNode) so we can
-    also lift image_prompt out into state for the conditional edge below,
-    and so retrieve_context can be dispatched with this chat's thread_id
-    injected - the model itself never sees or passes thread_id, it only
-    supplies `query`. config is LangGraph's standard second node argument;
+    also lift image_prompt/video_id out into state for the conditional
+    edge below and the UI respectively, and so retrieve_context can be
+    dispatched with this chat's thread_id injected - the model itself
+    never sees or passes thread_id, it only supplies `query`. config is
+    LangGraph's standard second node argument;
     config["configurable"]["thread_id"] is the same thread_id app.py passed
-    in when it called compiled_graph.stream(...)."""
+    in when it called compiled_graph.stream(...).
+
+    video_id starts from state.get("video_id") same as image_prompt does -
+    but unlike image_prompt, if play_video doesn't fire this turn, that
+    starting value is just returned unchanged rather than having already
+    been reset to None by prepare_input. That's what makes a loaded video
+    persist turn-to-turn instead of disappearing the moment play_video
+    isn't called again."""
     thread_id = config["configurable"]["thread_id"]
     last = state["messages"][-1]
     tool_messages = []
     image_prompt = state.get("image_prompt")
+    video_id = state.get("video_id")
 
     for call in last.tool_calls:
         if call["name"] == "retrieve_context":
@@ -102,10 +124,14 @@ def call_tools(state: ChatState, config: RunnableConfig) -> dict:
             result = tool_fn.invoke(call["args"])
             if call["name"] == "generate_image":
                 image_prompt = call["args"].get("prompt")
+            elif call["name"] == "play_video":
+                resolved = extract_video_id(call["args"].get("video_id", ""))
+                if resolved:
+                    video_id = resolved
 
         tool_messages.append(ToolMessage(content=str(result), tool_call_id=call["id"]))
 
-    return {"messages": tool_messages, "image_prompt": image_prompt}
+    return {"messages": tool_messages, "image_prompt": image_prompt, "video_id": video_id}
 
 
 def generate_image(state: ChatState) -> dict:

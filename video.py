@@ -1,0 +1,173 @@
+"""
+YouTube integration: search, transcript extraction, and embedding a video
+player in the UI. Mirrors the shape of multimodal.py/rag.py - a standalone
+module the tool-dispatch logic in graph.py's call_tools calls into.
+
+Three tools:
+- search_youtube: Data API v3 search, returns metadata including video_id.
+- extract_youtube_transcript: full transcript text for a specific video_id,
+  so the model can actually read/summarize/answer questions about a video's
+  content rather than just its title+description snippet.
+- play_video: the one that actually surfaces something in the UI. Calling
+  search_youtube alone does NOT display anything - it just gives the model
+  video_ids to choose from (same relationship generate_image's tool call
+  has to state.image_prompt: the tool call itself doesn't render anything,
+  graph.py's call_tools lifts the relevant argument into state, and that's
+  what the UI actually reads).
+
+Why video_id needs different handling from image_prompt/image_b64/audio_bytes:
+those are one-shot outputs - reset every turn in prepare_input so a stale
+image from three turns ago doesn't linger. A loaded video is different: if
+the user says "play the second one" and then keeps chatting, the video
+should stay visible and playable through the rest of the conversation, not
+disappear the moment the next message is sent. So state.video_id is
+deliberately NOT reset in prepare_input - see state.py and graph.py's
+prepare_input docstring. It still can't leak between chats, because
+LangGraph state is checkpointed per thread_id - Chat A's video_id lives in
+Chat A's checkpoint row, Chat B's in its own; app.py reads it back per
+thread the same way it already does for message history.
+"""
+
+import os
+import re
+from typing import Any, Dict, List
+
+from langchain_core.tools import tool
+
+_TRANSCRIPT_CHAR_LIMIT = 3000
+
+# Matches youtu.be/<id>, youtube.com/watch?v=<id>, youtube.com/embed/<id>,
+# or a bare 11-character id typed/pasted directly.
+_VIDEO_ID_RE = re.compile(
+    r"(?:youtu\.be/|youtube\.com/(?:watch\?v=|embed/|shorts/))([A-Za-z0-9_-]{11})|^([A-Za-z0-9_-]{11})$"
+)
+
+
+def extract_video_id(url_or_id: str) -> str | None:
+    """Pulls an 11-char video id out of a full YouTube URL, or passes a
+    bare id straight through. Used by play_video so it works whether the
+    model got the id from search_youtube's results or the user just pasted
+    a link directly."""
+    if not url_or_id:
+        return None
+    match = _VIDEO_ID_RE.search(url_or_id.strip())
+    if not match:
+        return None
+    return match.group(1) or match.group(2)
+
+
+@tool
+def search_youtube(query: str, max_results: int = 10) -> List[Dict[str, Any]]:
+    """
+    Searches YouTube for videos matching a query via the Data API v3.
+    Use this tool when video content (talks, demos, interviews) is likely to be
+    relevant. To read a video's full transcript, pass the returned 'video_id'
+    into extract_youtube_transcript. To actually show/play a video for the
+    user, pass its 'video_id' into play_video.
+    REQUIRES the YOUTUBE_API_KEY environment variable to be set.
+
+    Args:
+        query: The search topic or keywords.
+        max_results: Maximum number of videos to retrieve (default is 10).
+
+    Returns:
+        List of dictionaries with video metadata, including 'video_id' for use
+        with extract_youtube_transcript and play_video.
+    """
+    api_key = os.getenv("YOUTUBE_API_KEY")
+    if not api_key:
+        return [{"error": "YOUTUBE_API_KEY not set in environment."}]
+
+    try:
+        from googleapiclient.discovery import build
+        youtube = build("youtube", "v3", developerKey=api_key)
+        response = youtube.search().list(
+            q=query, part="snippet", type="video", maxResults=max_results
+        ).execute()
+    except Exception as e:
+        return [{"error": f"Error querying YouTube API: {str(e)}"}]
+
+    results = []
+    for item in response.get("items", []):
+        vid = item["id"]["videoId"]
+        snippet = item["snippet"]
+        results.append({
+            "title": snippet.get("title", ""),
+            "author": snippet.get("channelTitle"),
+            "created": snippet.get("publishedAt"),
+            "text": snippet.get("description"),
+            "video_id": vid,
+            "url": f"https://www.youtube.com/watch?v={vid}",
+        })
+    return results
+
+
+@tool
+def extract_youtube_transcript(video_id: str, char_limit: int = 3000) -> str:
+    """
+    Fetches the full transcript of a YouTube video.
+    Use this tool AFTER search_youtube, passing the 'video_id' of a specific video
+    you want to read in full rather than just its description. Falls back to a
+    "transcript unavailable" message if the video has no transcript (disabled by
+    the uploader, or none in a usable language).
+    Requires the youtube-transcript-api package to be installed.
+
+    Args:
+        video_id: The YouTube video ID, as returned by search_youtube.
+        char_limit: Maximum number of characters to return (default is 3000).
+
+    Returns:
+        The video transcript as plain text, truncated to char_limit.
+    """
+    try:
+        from youtube_transcript_api import YouTubeTranscriptApi
+        from youtube_transcript_api._errors import (
+            TranscriptsDisabled,
+            NoTranscriptFound,
+            VideoUnavailable,
+        )
+    except ImportError:
+        return "Error: youtube-transcript-api is not installed."
+
+    try:
+        ytt_api = YouTubeTranscriptApi()
+        try:
+            fetched = ytt_api.fetch(video_id, languages=["en"])
+        except NoTranscriptFound:
+            transcript_list = ytt_api.list(video_id)
+            transcript = next(iter(transcript_list))
+            fetched = transcript.fetch()
+
+        text = " ".join(snippet.text for snippet in fetched)
+        return text[:char_limit]
+
+    except (TranscriptsDisabled, VideoUnavailable):
+        return "Transcript unavailable for this video (disabled by uploader or video unavailable)."
+    except Exception as e:
+        return f"Error extracting YouTube transcript: {str(e)}"
+
+
+@tool
+def play_video(video_id: str) -> str:
+    """Load a YouTube video into the embedded player shown to the user.
+    Call this whenever the user asks to watch, play, or see a specific
+    video - either one you just found via search_youtube (pass its
+    'video_id'), or one the user gave you directly as a URL or id. The
+    video stays visible for the rest of the conversation until a new one
+    is loaded, so you don't need to call this again on every turn.
+
+    Args:
+        video_id: A YouTube video id, or a full YouTube/youtu.be URL - both
+            work, the id is extracted automatically.
+    """
+    resolved = extract_video_id(video_id)
+    if not resolved:
+        return f"Could not extract a valid YouTube video id from: {video_id}"
+    # The actual state update (state.video_id) happens in graph.py's
+    # call_tools, which special-cases this tool by name - same pattern as
+    # generate_image/image_prompt. This return value is just the
+    # ToolMessage content the model sees to confirm the action.
+    return f"Now playing video {resolved}."
+
+
+video_tools = [search_youtube, extract_youtube_transcript, play_video]

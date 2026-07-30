@@ -17,6 +17,14 @@ per-chat Chroma collection (rag.py), and retrieve_context (tools.py) pulls
 back relevant chunks per query - there's no longer a "pending file text"
 value that needs to ride along in graph state waiting to be folded into
 the next message.
+
+video_id (video.py's play_video tool) is intentionally NOT reset every
+turn in prepare_input, unlike image_prompt/image_b64/audio_bytes. Those
+are one-shot outputs for a single turn; a loaded video should keep
+playing across the rest of the conversation until a new one replaces it.
+It still can't leak between chats, because state is checkpointed per
+thread_id - each chat has its own persisted video_id, the same way it has
+its own message history.
 """
 
 from typing import Annotated, Optional, TypedDict
@@ -48,3 +56,9 @@ class ChatState(TypedDict):
     # Outputs consumed by the Gradio UI after a run
     image_b64: Optional[str]
     audio_bytes: Optional[bytes]
+
+    # Set by the tools node when play_video fires. Persists across turns
+    # (not cleared in prepare_input) until a new video is loaded - see the
+    # module docstring above for why this one field behaves differently
+    # from image_b64/audio_bytes.
+    video_id: Optional[str]
