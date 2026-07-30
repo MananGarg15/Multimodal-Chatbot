@@ -13,6 +13,10 @@
   },
   {
     "id": "4",
-    "name": "Chat4"
+    "name": "Tavily chat"
+  },
+  {
+    "id": "5",
+    "name": "Chat5"
   }
 ]

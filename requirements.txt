@@ -5,6 +5,9 @@ langchain-openai>=0.2
 langchain-chroma>=0.1
 langchain-text-splitters>=0.3
 chromadb>=0.5
+tavily-python>=0.5
+beautifulsoup4
+requests
 openai>=1.40
 gradio>=4.0
 PyPDF2

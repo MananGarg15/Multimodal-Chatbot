@@ -9,9 +9,11 @@ into a single LangGraph app. See `graph.py` for the node/edge design.
 
 The ticket-price tools (`get_ticket_price`, `set_ticket_price`, and the
 SQLite `Tables.db` they used) have been removed entirely. `tools.py` now
-has two tools: `generate_image` (`image_prompt`, set directly from the tool
-call's `prompt` argument, is the only thing driving image generation), and
-`retrieve_context` for RAG over uploaded documents (see `rag.py`).
+has four tools: `generate_image` (`image_prompt`, set directly from the
+tool call's `prompt` argument, is the only thing driving image
+generation), `retrieve_context` for RAG over uploaded documents (see
+`rag.py`), and `web_search` / `fetch_page` for live web search (via
+Tavily) and full-page fetching.
 
 ## Setup
 
@@ -19,8 +21,11 @@ call's `prompt` argument, is the only thing driving image generation), and
 pip install -r requirements.txt
 ```
 
-Same `.env` keys as before: `GOOGLE_API_KEY`, `OPENROUTER_API_KEY`, `OPENAI_API_KEY`.
-(`ollama` needs no key, just a running local server on `localhost:11434`.)
+Same `.env` keys as before, plus one new one: `GOOGLE_API_KEY`,
+`OPENROUTER_API_KEY`, `OPENAI_API_KEY`, and now `TAVILY_API_KEY` (for
+`web_search` - get a free key at tavily.com, 1,000 searches/month on the
+free tier). (`ollama` needs no key, just a running local server on
+`localhost:11434`.)
 
 ```bash
 python app.py
@@ -43,6 +48,7 @@ python app.py
 | Delete was the only per-chat action, plain-width button | Delete (🗑) and rename (✏️) as small icon-width buttons at the end of each chat row | Rename edits the name in place via a small textbox + ✔/✕ confirm, no popup/modal needed. |
 | `run_turn` passed `base64.b64decode(image_b64)` (raw bytes) straight to `gr.Image` | Decoded to a `PIL.Image` via `io.BytesIO` first | `gr.Image` doesn't accept raw bytes - only `np.ndarray`, `PIL.Image`, or a path/string - so raw bytes raised `ComponentProcessingError`. |
 | Uploaded file's raw extracted text was stashed in `state.file_content` and folded into the very next `HumanMessage` only | `app.py`'s `get_file_content` embeds the file into a per-chat Chroma collection (`rag.py`) at upload time; `retrieve_context` (`tools.py`) pulls back relevant chunks per query via `graph.py`'s `call_tools`, which injects the chat's `thread_id` | The old approach only helped for one turn and could blow past the model's context window on a large file. Chunked + embedded retrieval keeps the document queryable for the whole chat and only pulls in what's relevant per question. |
+| No way to answer questions about current events / anything outside training data or uploaded docs | `tools.py`'s `web_search` (Tavily) and `fetch_page` (fetch + extract text from a specific URL via `requests`/`BeautifulSoup`) | Rounds out the tool set per the original plan; both dispatch through the existing generic branch in `call_tools` - no graph changes needed, same as `retrieve_context` needed a routing change but `generate_image` didn't. |
 
 ## Known limitations to verify once you have keys/network
 
@@ -50,8 +56,12 @@ python app.py
 - Tool-calling support varies by model/source - `ollama`'s default `gpt-oss:20b` and some OpenRouter free models may not reliably emit `tool_calls`; this mirrors a limitation that existed in the old code too.
 - Image generation and TTS always use the native `openai` client (same as the old `artist()`/`talker()`), regardless of which `source` you're chatting with - so those features need `OPENAI_API_KEY` set even if you're chatting via Gemini/OpenRouter/Ollama. Embeddings (`rag.py`, `text-embedding-3-small`) are the same - `OPENAI_API_KEY` is required for file upload/RAG regardless of chat `source`.
 - Per-chat vector data lives in `./chroma_db/<thread_id>/`, alongside `chatbot_checkpoints.sqlite` and `chat_list.json` - back up or `.gitignore` all three the same way.
-- `retrieve_context` is gated behind the same "Enable tools" checkbox as `generate_image` - if it's off, the model can't call either tool, so an uploaded document won't be searchable until it's checked.
+- All four tools (`generate_image`, `retrieve_context`, `web_search`, `fetch_page`) are gated behind the same "Enable tools" checkbox - if it's off, the model can't call any of them.
+- `web_search` degrades to a plain "not configured" tool message (rather than erroring) if `TAVILY_API_KEY` is unset - the app still runs fine without it, the model just won't be able to search.
+- `fetch_page`'s HTML-to-text extraction is a basic tag-strip via BeautifulSoup, not a full readability/boilerplate-removal pass - it'll include some nav/sidebar noise on pages `web_search`'s own snippet wouldn't have.
 
-## Next steps (per your original plan)
+## Possible future work
 
-- Add web search: wrap `Scraper.py`'s `scrape_text`/`get_all_links` as another `@tool`, same pattern as `tools.py`.
+- Swap `fetch_page`'s bare BeautifulSoup extraction for something closer to Readability.js/`trafilatura` if page noise becomes a real problem.
+- A token-budget check on `retrieve_context`/`web_search` output, rather than the current flat character caps, so results scale with the model's actual context window instead of a fixed number.
+- `.env.example` listing all required keys (`OPENAI_API_KEY`, `GOOGLE_API_KEY`, `OPENROUTER_API_KEY`, `TAVILY_API_KEY`) for a fresh clone.
