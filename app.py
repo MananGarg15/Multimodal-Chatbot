@@ -18,6 +18,7 @@ every thread's history sitting in it.
 import base64
 import copy
 import io
+from pathlib import Path
 
 import gradio as gr
 import PyPDF2
@@ -25,19 +26,35 @@ from PIL import Image
 from langchain_core.messages import AIMessage, HumanMessage
 
 import chat_store
+import rag
 from graph import compiled_graph
 from llm_setup import DEFAULT_MODEL_ALIASES
 
 
-def get_file_content(file_path):
+def get_file_content(file_path, chat_id):
+    """Extracts text from an uploaded PDF/TXT and embeds it straight into
+    this chat's Chroma collection via rag.ingest_text() - replacing the old
+    approach of stashing the raw text in a file_content state value that
+    got dumped wholesale into the very next message. The file's content
+    now stays queryable (via the retrieve_context tool) for the rest of
+    the chat instead of just the next turn, and a large document no longer
+    risks blowing past the model's context window in one shot."""
+    filename = Path(file_path.name).name
+
     if file_path.name.endswith(".pdf"):
         with open(file_path.name, "rb") as f:
             reader = PyPDF2.PdfReader(f)
-            return "".join(page.extract_text() or "" for page in reader.pages)
-    if file_path.name.endswith(".txt"):
+            text = "".join(page.extract_text() or "" for page in reader.pages)
+    elif file_path.name.endswith(".txt"):
         with open(file_path.name, "r") as f:
-            return f.read()
-    return ""
+            text = f.read()
+    else:
+        return "⚠️ Unsupported file type."
+
+    chunk_count = rag.ingest_text(chat_id, filename, text)
+    if chunk_count == 0:
+        return f"⚠️ Couldn't extract any text from {filename}."
+    return f"📄 Indexed {filename} ({chunk_count} chunks) - ask me about it."
 
 
 def _history_to_gradio(thread_id, source, model, temperature, use_tools, speak_enabled):
@@ -57,18 +74,21 @@ def _history_to_gradio(thread_id, source, model, temperature, use_tools, speak_e
     return out
 
 
-def run_turn(message, file_content, source, model, temperature, chat_id, use_tools, speak_enabled, history):
+def run_turn(message, source, model, temperature, chat_id, use_tools, speak_enabled, history):
     """Streams the assistant reply token-by-token via stream_mode='messages',
     then yields the finished image/audio once the graph reaches END. This
     replaces wrapLlm() in both chatbot.py and chatbot_multimodal.py, and
-    stream_with_tools() in chatbot_multimodal.py."""
+    stream_with_tools() in chatbot_multimodal.py. No file_content here
+    anymore - uploaded files are ingested straight into this chat's Chroma
+    collection at upload time (see get_file_content above), and pulled back
+    per-query by the retrieve_context tool instead of riding along on every
+    turn's state."""
     config = {"configurable": {"thread_id": str(chat_id)}}
     inputs = {
         "messages": [HumanMessage(content=message)],
         "source": source,
         "model": model,
         "temperature": temperature,
-        "file_content": file_content,
         "use_tools": use_tools,
         "speak_enabled": speak_enabled,
     }
@@ -122,6 +142,7 @@ def delete_chat(chat_list, chat_id, current_chat_id):
         # disappears from the sidebar either way, this just means the raw
         # rows linger in the sqlite file until manually cleaned up.
         pass
+    rag.delete_thread_store(str(chat_id))
 
     if not chat_list:
         chat_list = [{"id": "1", "name": "Chat1"}]
@@ -173,7 +194,7 @@ def on_page_load():
 
 
 def reset_content():
-    return "", ""
+    return ""
 
 
 def on_source_change(new_source):
@@ -199,7 +220,6 @@ def build_app():
         source = gr.State("openRouter")
         model_name = gr.State("openrouter/free")
         temperature = gr.State(0.0)
-        file_content = gr.State("")
         use_tools = gr.State(False)
         speak_enabled = gr.State(False)
 
@@ -264,16 +284,16 @@ def build_app():
                     submit_btn = gr.Button("enter", size="sm", variant="primary", scale=1)
 
                 turn_inputs = [
-                    user_input, file_content, source, model_name, temperature,
+                    user_input, source, model_name, temperature,
                     chat_no, use_tools, speak_enabled, chat_history,
                 ]
                 turn_outputs = [chat_history, image_box, audio_box]
 
                 submit_btn.click(run_turn, inputs=turn_inputs, outputs=turn_outputs).then(
-                    fn=reset_content, outputs=[file_content, user_input]
+                    fn=reset_content, outputs=[user_input]
                 )
                 user_input.submit(run_turn, inputs=turn_inputs, outputs=turn_outputs).then(
-                    fn=reset_content, outputs=[file_content, user_input]
+                    fn=reset_content, outputs=[user_input]
                 )
 
             with gr.Column(scale=1):
@@ -294,14 +314,15 @@ def build_app():
                         outputs=[source, model_name, model_name_input],
                     )
 
-                    tools_checkbox = gr.Checkbox(label="Enable tools (image generation)", value=False)
+                    tools_checkbox = gr.Checkbox(label="Enable tools (image generation + document search)", value=False)
                     tools_checkbox.change(fn=lambda t: t, inputs=[tools_checkbox], outputs=[use_tools])
 
                     speak_checkbox = gr.Checkbox(label="Speak replies aloud (TTS)", value=False)
                     speak_checkbox.change(fn=lambda t: t, inputs=[speak_checkbox], outputs=[speak_enabled])
 
                 files = gr.File(label="insert file", file_count="single", file_types=[".pdf", ".txt"])
-                files.upload(fn=get_file_content, inputs=[files], outputs=[file_content])
+                upload_status = gr.Markdown()
+                files.upload(fn=get_file_content, inputs=[files, chat_no], outputs=[upload_status])
 
         # Fires once per browser session (initial load AND every refresh) -
         # this is what actually re-reads chat_list.json each time, unlike

@@ -8,11 +8,10 @@ Ports and merges:
 into a single LangGraph app. See `graph.py` for the node/edge design.
 
 The ticket-price tools (`get_ticket_price`, `set_ticket_price`, and the
-SQLite `Tables.db` they used) have been removed entirely. The only tool
-left is `generate_image`, and the `destination_city` state field that
-existed solely to support the ticket-price flow is gone too - `image_prompt`
-(set directly from the tool call's `prompt` argument) is now the only thing
-driving image generation.
+SQLite `Tables.db` they used) have been removed entirely. `tools.py` now
+has two tools: `generate_image` (`image_prompt`, set directly from the tool
+call's `prompt` argument, is the only thing driving image generation), and
+`retrieve_context` for RAG over uploaded documents (see `rag.py`).
 
 ## Setup
 
@@ -43,14 +42,16 @@ python app.py
 | Sidebar chat list was `chat_list = gr.State(["Chat1"])`, position-based ids (`i + 1`) | `chat_store.py` persists `[{"id", "name"}, ...]` to `chat_list.json`, with stable ids that are never reused | Previously the sidebar forgot every chat on restart even though `chatbot_checkpoints.sqlite` still had the histories. Position-based ids also silently pointed rename/delete at the wrong thread after a mid-list delete; stable ids fix that. |
 | Delete was the only per-chat action, plain-width button | Delete (🗑) and rename (✏️) as small icon-width buttons at the end of each chat row | Rename edits the name in place via a small textbox + ✔/✕ confirm, no popup/modal needed. |
 | `run_turn` passed `base64.b64decode(image_b64)` (raw bytes) straight to `gr.Image` | Decoded to a `PIL.Image` via `io.BytesIO` first | `gr.Image` doesn't accept raw bytes - only `np.ndarray`, `PIL.Image`, or a path/string - so raw bytes raised `ComponentProcessingError`. |
+| Uploaded file's raw extracted text was stashed in `state.file_content` and folded into the very next `HumanMessage` only | `app.py`'s `get_file_content` embeds the file into a per-chat Chroma collection (`rag.py`) at upload time; `retrieve_context` (`tools.py`) pulls back relevant chunks per query via `graph.py`'s `call_tools`, which injects the chat's `thread_id` | The old approach only helped for one turn and could blow past the model's context window on a large file. Chunked + embedded retrieval keeps the document queryable for the whole chat and only pulls in what's relevant per question. |
 
 ## Known limitations to verify once you have keys/network
 
 - Not run end-to-end in this sandbox (no network access, no API keys available here) - the code is written to match your existing patterns and compiles cleanly, but please smoke-test locally before relying on it.
 - Tool-calling support varies by model/source - `ollama`'s default `gpt-oss:20b` and some OpenRouter free models may not reliably emit `tool_calls`; this mirrors a limitation that existed in the old code too.
-- Image generation and TTS always use the native `openai` client (same as the old `artist()`/`talker()`), regardless of which `source` you're chatting with - so those features need `OPENAI_API_KEY` set even if you're chatting via Gemini/OpenRouter/Ollama.
+- Image generation and TTS always use the native `openai` client (same as the old `artist()`/`talker()`), regardless of which `source` you're chatting with - so those features need `OPENAI_API_KEY` set even if you're chatting via Gemini/OpenRouter/Ollama. Embeddings (`rag.py`, `text-embedding-3-small`) are the same - `OPENAI_API_KEY` is required for file upload/RAG regardless of chat `source`.
+- Per-chat vector data lives in `./chroma_db/<thread_id>/`, alongside `chatbot_checkpoints.sqlite` and `chat_list.json` - back up or `.gitignore` all three the same way.
+- `retrieve_context` is gated behind the same "Enable tools" checkbox as `generate_image` - if it's off, the model can't call either tool, so an uploaded document won't be searchable until it's checked.
 
 ## Next steps (per your original plan)
 
-- Add RAG: a `retrieve` node before `agent`, or a `retriever_tool` alongside `all_tools`.
 - Add web search: wrap `Scraper.py`'s `scrape_text`/`get_all_links` as another `@tool`, same pattern as `tools.py`.

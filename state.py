@@ -7,10 +7,16 @@ Replaces:
 - The per-call `tool_arguments` plumbing from tool_calling.py and
   chatbot_multimodal.py's stream_with_tools() is now just fields on this state.
 
-destination_city has been removed - it only existed to support the
-ticket-price tool's image-generation side-channel, and that tool no longer
-exists. image_prompt (set directly by the generate_image tool) is now the
-only thing that drives image generation.
+destination_city was removed when the ticket-price tool was removed -
+image_prompt (set by the generate_image tool) is the only thing that
+drives image generation.
+
+file_content has since been removed too, now that RAG is in place.
+Uploaded files are chunked/embedded at upload time straight into a
+per-chat Chroma collection (rag.py), and retrieve_context (tools.py) pulls
+back relevant chunks per query - there's no longer a "pending file text"
+value that needs to ride along in graph state waiting to be folded into
+the next message.
 """
 
 from typing import Annotated, Optional, TypedDict
@@ -28,9 +34,6 @@ class ChatState(TypedDict):
     source: str          # 'openRouter' | 'gemini' | 'ollama' | 'openai'
     model: str
     temperature: float
-
-    # Set by prepare_input from an uploaded PDF/TXT, consumed then cleared
-    file_content: str
 
     # Feature toggles (the checkboxes in chatbot_multimodal.py)
     use_tools: bool
