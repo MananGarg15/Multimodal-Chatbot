@@ -32,9 +32,11 @@ import os
 import re
 from typing import Any, Dict, List
 
+import requests
 from langchain_core.tools import tool
 
 _TRANSCRIPT_CHAR_LIMIT = 3000
+_OEMBED_URL = "https://www.youtube.com/oembed"
 
 # Matches youtu.be/<id>, youtube.com/watch?v=<id>, youtube.com/embed/<id>,
 # or a bare 11-character id typed/pasted directly.
@@ -54,6 +56,32 @@ def extract_video_id(url_or_id: str) -> str | None:
     if not match:
         return None
     return match.group(1) or match.group(2)
+
+
+def is_embeddable(video_id: str) -> bool:
+    """Checks YouTube's oEmbed endpoint to see whether this video actually
+    allows embedding, before the UI claims it's playing. Some uploaders
+    disable embedding entirely (common for music videos, trailers, some
+    news clips) - a disabled-embed video's iframe just shows YouTube's own
+    "Video unavailable" message with a "Watch on YouTube" link, which looks
+    broken but isn't a bug on our end; there's no way to override it
+    client-side. Checking oEmbed first lets graph.py's call_tools give an
+    honest tool result instead of silently setting video_id for a video
+    that's never going to actually play in the embedded panel.
+
+    Defaults to True (assume embeddable) on network errors/timeouts,
+    rather than blocking playback attempts over a transient failure on our
+    check - worst case in that scenario is the same "click through to
+    YouTube" fallback a real disabled-embed video would show anyway."""
+    try:
+        resp = requests.get(
+            _OEMBED_URL,
+            params={"url": f"https://www.youtube.com/watch?v={video_id}", "format": "json"},
+            timeout=5,
+        )
+    except requests.RequestException:
+        return True
+    return resp.status_code == 200
 
 
 @tool
@@ -156,6 +184,12 @@ def play_video(video_id: str) -> str:
     video stays visible for the rest of the conversation until a new one
     is loaded, so you don't need to call this again on every turn.
 
+    Note: some videos have embedding disabled by their uploader and can't
+    play in the embedded panel at all - if that's the case here, the tool
+    result you get back will say so instead of "Now playing", and you
+    should tell the user to open it directly on YouTube instead of acting
+    like it's playing.
+
     Args:
         video_id: A YouTube video id, or a full YouTube/youtu.be URL - both
             work, the id is extracted automatically.
@@ -163,11 +197,13 @@ def play_video(video_id: str) -> str:
     resolved = extract_video_id(video_id)
     if not resolved:
         return f"Could not extract a valid YouTube video id from: {video_id}"
-    # The actual state update (state.video_id) happens in graph.py's
-    # call_tools, which special-cases this tool by name - same pattern as
-    # generate_image/image_prompt. This return value is just the
-    # ToolMessage content the model sees to confirm the action.
-    return f"Now playing video {resolved}."
+    # The actual state update (state.video_id) AND the embeddability check
+    # (is_embeddable) happen in graph.py's call_tools, which special-cases
+    # this tool by name - same pattern as generate_image/image_prompt.
+    # This return value is a placeholder; call_tools overwrites the
+    # ToolMessage content with the real outcome (playing vs. not
+    # embeddable) once it knows which one actually happened.
+    return f"Attempting to play video {resolved}."
 
 
 video_tools = [search_youtube, extract_youtube_transcript, play_video]

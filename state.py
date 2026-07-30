@@ -18,13 +18,15 @@ back relevant chunks per query - there's no longer a "pending file text"
 value that needs to ride along in graph state waiting to be folded into
 the next message.
 
-video_id (video.py's play_video tool) is intentionally NOT reset every
-turn in prepare_input, unlike image_prompt/image_b64/audio_bytes. Those
-are one-shot outputs for a single turn; a loaded video should keep
-playing across the rest of the conversation until a new one replaces it.
-It still can't leak between chats, because state is checkpointed per
-thread_id - each chat has its own persisted video_id, the same way it has
-its own message history.
+image_b64 and video_id both persist across turns rather than resetting
+every turn - a generated image or a loaded video stays visible through
+the rest of the conversation until a new one replaces it (image_b64 when
+generate_image fires again, video_id when play_video fires again and
+passes the embeddability check in video.py). image_prompt and audio_bytes
+stay one-shot: image_prompt is just this turn's trigger for whether to
+generate at all, and audio_bytes is a TTS clip meant to play once per
+turn it's produced. See graph.py's prepare_input/call_tools for where
+this split is enforced.
 """
 
 from typing import Annotated, Optional, TypedDict
@@ -53,12 +55,20 @@ class ChatState(TypedDict):
     # prompt from a previous turn never re-triggers image generation.
     image_prompt: Optional[str]
 
-    # Outputs consumed by the Gradio UI after a run
+    # image_b64: persists across turns (NOT reset in prepare_input) - a
+    # generated image stays visible until generate_image produces a new
+    # one, same reasoning as video_id below. audio_bytes stays one-shot -
+    # reset every turn, since a TTS clip is meant to play once per turn
+    # it's produced, not linger as a "now showing" panel the way an image
+    # or video does.
     image_b64: Optional[str]
     audio_bytes: Optional[bytes]
 
-    # Set by the tools node when play_video fires. Persists across turns
-    # (not cleared in prepare_input) until a new video is loaded - see the
-    # module docstring above for why this one field behaves differently
-    # from image_b64/audio_bytes.
+    # Set by the tools node when play_video fires and the video is
+    # confirmed embeddable (video.py's is_embeddable). Persists across
+    # turns like image_b64 - NOT reset in prepare_input - so a loaded
+    # video keeps playing through the rest of the conversation until a
+    # new one replaces it. Can't leak between chats since state is
+    # checkpointed per thread_id; app.py reads each chat's own value back
+    # on chat switch/reload the same way it already does for messages.
     video_id: Optional[str]

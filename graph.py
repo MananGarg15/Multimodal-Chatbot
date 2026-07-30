@@ -13,11 +13,18 @@ been removed entirely. Tools are now generate_image (sets image_prompt),
 retrieve_context (RAG lookup against this chat's uploaded documents, see
 rag.py), web_search/fetch_page (Tavily), and search_youtube/
 extract_youtube_transcript/play_video (video.py - play_video sets
-video_id).
+video_id, checked against YouTube's oEmbed endpoint first since some
+videos have embedding disabled by their uploader).
 
-video_id is the odd one out among these: unlike image_prompt (reset every
-turn in prepare_input below), video_id deliberately persists across turns
-once play_video sets it - see state.py's docstring for why.
+image_b64 and video_id both persist across turns now, rather than being
+reset every turn the way image_prompt/audio_bytes still are. A generated
+image or a loaded video stays visible through the rest of the
+conversation until a new one replaces it - each is only overwritten when
+its producing node/tool actually fires again (generate_image, play_video),
+never implicitly cleared just because another turn happened. app.py reads
+both back per-thread on chat switch/reload the same way it already does
+for message history, so they can't leak between chats either - each
+chat's checkpoint carries its own image_b64/video_id.
 
 Graph shape (unchanged since the RAG/web-search/video tools were added -
 they all slot into the existing agent <-> tools loop, no new nodes/edges
@@ -45,25 +52,31 @@ from llm_setup import get_llm
 from multimodal import generate_image_b64, generate_speech
 from state import ChatState
 from tools import all_tools
-from video import extract_video_id
+from video import extract_video_id, is_embeddable
 
 TOOL_MAP = {t.name: t for t in all_tools}
 
 
 def prepare_input(state: ChatState) -> dict:
-    """Resets image_prompt/image/audio so a stale value from a previous
-    turn can't leak into this one. File ingestion now happens at upload
-    time (app.py's get_file_content -> rag.ingest_text()), not here - the
-    old approach of folding the entire extracted file text into the next
-    HumanMessage is gone. retrieve_context (tools.py) pulls back just the
-    relevant chunks per query instead, so there's no file_content field
-    left to consume/clear at this point.
+    """Resets image_prompt/audio_bytes so a stale value from a previous
+    turn can't leak into this one - image_prompt is just this turn's
+    trigger (re-checked every turn via route_after_agent), and audio_bytes
+    is a one-shot TTS output meant to play once per turn it's produced.
 
-    video_id is deliberately NOT included here - a loaded video should
-    keep playing across the rest of the conversation, not vanish on the
-    next turn the way a generated image does. It's only ever overwritten
-    when play_video fires again (see call_tools below)."""
-    return {"image_prompt": None, "image_b64": None, "audio_bytes": None}
+    image_b64 and video_id are deliberately NOT reset here - both persist
+    across turns until their producing node/tool fires again (see the
+    module docstring above). Clearing them on every turn was tried and
+    caused more confusion than it solved (a fresh turn wiping out a video/
+    image the user was still looking at), so this only resets the two
+    genuinely one-shot fields.
+
+    File ingestion happens at upload time (app.py's get_file_content ->
+    rag.ingest_text()), not here - the old approach of folding the entire
+    extracted file text into the next HumanMessage is gone.
+    retrieve_context (tools.py) pulls back just the relevant chunks per
+    query instead, so there's no file_content field left to consume/clear
+    at this point."""
+    return {"image_prompt": None, "audio_bytes": None}
 
 
 def agent(state: ChatState) -> dict:
@@ -104,12 +117,21 @@ def call_tools(state: ChatState, config: RunnableConfig) -> dict:
     config["configurable"]["thread_id"] is the same thread_id app.py passed
     in when it called compiled_graph.stream(...).
 
-    video_id starts from state.get("video_id") same as image_prompt does -
-    but unlike image_prompt, if play_video doesn't fire this turn, that
-    starting value is just returned unchanged rather than having already
-    been reset to None by prepare_input. That's what makes a loaded video
-    persist turn-to-turn instead of disappearing the moment play_video
-    isn't called again."""
+    video_id starts from state.get("video_id") - the value persisted from
+    whenever play_video last set it (possibly several turns ago, possibly
+    never), since prepare_input no longer resets it. It only changes here
+    if play_video fires again this turn and passes the is_embeddable
+    check below; otherwise the existing value is returned unchanged, which
+    is what keeps a loaded video visible across turns that don't touch it.
+
+    play_video is special-cased before tool_fn.invoke() even runs (unlike
+    generate_image, which still calls its own tool body) because deciding
+    what actually happened requires a network call (is_embeddable) the
+    tool function itself has no business making - some videos have
+    embedding disabled by their uploader and will never play in our
+    iframe no matter what, so video_id is only overwritten - and the model
+    is only told "Now playing" - when the check confirms it'll actually
+    work."""
     thread_id = config["configurable"]["thread_id"]
     last = state["messages"][-1]
     tool_messages = []
@@ -119,15 +141,28 @@ def call_tools(state: ChatState, config: RunnableConfig) -> dict:
     for call in last.tool_calls:
         if call["name"] == "retrieve_context":
             result = rag.retrieve(thread_id, call["args"].get("query", ""))
+        elif call["name"] == "play_video":
+            # Don't trust play_video's own return value for this one - it
+            # can't know whether the video is actually embeddable, that
+            # check needs a network call, done here rather than inside the
+            # tool body so the tool stays a plain, testable function.
+            resolved = extract_video_id(call["args"].get("video_id", ""))
+            if not resolved:
+                result = f"Could not extract a valid YouTube video id from: {call['args'].get('video_id', '')}"
+            elif is_embeddable(resolved):
+                video_id = resolved
+                result = f"Now playing video {resolved}."
+            else:
+                result = (
+                    f"Video {resolved} cannot be played here - the uploader has "
+                    f"disabled embedding for this video. Tell the user to watch "
+                    f"it directly at https://www.youtube.com/watch?v={resolved}"
+                )
         else:
             tool_fn = TOOL_MAP[call["name"]]
             result = tool_fn.invoke(call["args"])
             if call["name"] == "generate_image":
                 image_prompt = call["args"].get("prompt")
-            elif call["name"] == "play_video":
-                resolved = extract_video_id(call["args"].get("video_id", ""))
-                if resolved:
-                    video_id = resolved
 
         tool_messages.append(ToolMessage(content=str(result), tool_call_id=call["id"]))
 

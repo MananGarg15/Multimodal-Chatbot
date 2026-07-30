@@ -13,6 +13,14 @@ never-reused ids (see chat_store.py), persisted to chat_list.json so the
 sidebar remembers every chat across a restart - previously it only ever
 started back at ["Chat1"] even though the sqlite checkpoint file still had
 every thread's history sitting in it.
+
+The generated-image and video panels both persist across turns now (see
+state.py/graph.py) - an image or video stays visible until a new one
+replaces it, rather than clearing on the next message. Switching chats,
+deleting the current chat, or refreshing the browser all read each
+thread's own image_b64/video_id back from the checkpointer (_thread_image,
+_thread_video_html below) the same way message history already gets
+restored, so nothing leaks between chats.
 """
 
 import base64
@@ -90,13 +98,25 @@ def _video_html(video_id):
 
 def _thread_video_html(thread_id):
     """Reads back this thread's persisted video_id (see state.py/graph.py
-    for why video_id, unlike image_b64, survives across turns) so
+    for why video_id, like image_b64, survives across turns) so
     switching to a chat that already had a video loaded shows it again,
     the same way switching chats already restores message history."""
     config = {"configurable": {"thread_id": str(thread_id)}}
     snapshot = compiled_graph.get_state(config)
     video_id = snapshot.values.get("video_id") if snapshot.values else None
     return _video_html(video_id)
+
+
+def _thread_image(thread_id):
+    """Same idea as _thread_video_html, for image_b64. Both fields persist
+    in graph state across turns now (see state.py), so both need this
+    same read-back-on-switch treatment - restoring one but not the other
+    would mean a generated image quietly vanishes when you leave and
+    return to a chat, while a loaded video wouldn't."""
+    config = {"configurable": {"thread_id": str(thread_id)}}
+    snapshot = compiled_graph.get_state(config)
+    image_b64 = snapshot.values.get("image_b64") if snapshot.values else None
+    return Image.open(io.BytesIO(base64.b64decode(image_b64))) if image_b64 else None
 
 
 def run_turn(message, source, model, temperature, chat_id, use_tools, speak_enabled, history):
@@ -125,11 +145,12 @@ def run_turn(message, source, model, temperature, chat_id, use_tools, speak_enab
     for token_chunk, metadata in compiled_graph.stream(inputs, config=config, stream_mode="messages"):
         if metadata.get("langgraph_node") == "agent" and getattr(token_chunk, "content", None):
             history[-1]["content"] += token_chunk.content
-            # gr.skip() on the video panel during streaming - video_id
-            # persists across turns (see state.py), so there's no "this
-            # turn's video" to show partway through; only the final state
-            # below reflects whatever's actually loaded right now.
-            yield history, None, None, gr.skip()
+            # gr.skip() on the image/video panels during streaming - both
+            # persist across turns now (see state.py), so there's no
+            # "this turn's image/video" to show partway through; only the
+            # final state below reflects whatever's actually loaded right
+            # now, whether this turn changed it or not.
+            yield history, gr.skip(), None, gr.skip()
 
     final_state = compiled_graph.get_state(config).values
     image_b64 = final_state.get("image_b64")
@@ -148,7 +169,7 @@ def run_turn(message, source, model, temperature, chat_id, use_tools, speak_enab
 
 def load_chat(chat_id, source, model, temperature, use_tools, speak_enabled):
     history = _history_to_gradio(chat_id, source, model, temperature, use_tools, speak_enabled)
-    return chat_id, history, _thread_video_html(chat_id)
+    return chat_id, history, _thread_image(chat_id), _thread_video_html(chat_id)
 
 
 def create_new_chat(chat_list):
@@ -184,8 +205,8 @@ def delete_chat(chat_list, chat_id, current_chat_id):
     if chat_id == current_chat_id or not still_exists:
         new_chat_id = chat_list[0]["id"]
         new_history = _history_to_gradio(new_chat_id, None, None, None, None, None)
-        return chat_list, new_chat_id, new_history, _thread_video_html(new_chat_id)
-    return chat_list, current_chat_id, gr.skip(), gr.skip()
+        return chat_list, new_chat_id, new_history, _thread_image(new_chat_id), _thread_video_html(new_chat_id)
+    return chat_list, current_chat_id, gr.skip(), gr.skip(), gr.skip()
 
 
 def start_rename(chat_id, chat_name):
@@ -221,7 +242,7 @@ def on_page_load():
     chats = chat_store.load_chats()
     first_id = chats[0]["id"]
     history = _history_to_gradio(first_id, None, None, None, None, None)
-    return chats, first_id, history, _thread_video_html(first_id)
+    return chats, first_id, history, _thread_image(first_id), _thread_video_html(first_id)
 
 
 def reset_content():
@@ -271,7 +292,7 @@ def build_app():
                             btn.click(
                                 fn=load_chat,
                                 inputs=[cid, source, model_name, temperature, use_tools, speak_enabled],
-                                outputs=[chat_no, chat_history, video_box],
+                                outputs=[chat_no, chat_history, image_box, video_box],
                             )
                             rename_btn.click(
                                 fn=start_rename,
@@ -281,7 +302,7 @@ def build_app():
                             del_btn.click(
                                 fn=delete_chat,
                                 inputs=[chat_list, cid, chat_no],
-                                outputs=[chat_list, chat_no, chat_history, video_box],
+                                outputs=[chat_list, chat_no, chat_history, image_box, video_box],
                             )
 
                 new_chat_btn.click(fn=create_new_chat, inputs=[chat_list], outputs=[chat_list, chat_no])
@@ -360,7 +381,7 @@ def build_app():
         # this is what actually re-reads chat_list.json each time, unlike
         # the gr.State defaults above which are fixed once at server
         # startup. This is the fix for chats disappearing on refresh.
-        demo.load(fn=on_page_load, outputs=[chat_list, chat_no, chat_history, video_box])
+        demo.load(fn=on_page_load, outputs=[chat_list, chat_no, chat_history, image_box, video_box])
 
     return demo
 
