@@ -83,12 +83,22 @@ def _history_to_gradio(thread_id, source, model, temperature, use_tools, speak_e
 
 
 def _video_html(video_id):
-    """Builds the embedded-player iframe for a given video_id, or an empty
-    string (renders as a blank panel) when there's nothing loaded."""
+    """Builds the embedded-player iframe for a given video_id, or a
+    placeholder panel (matching image_box's footprint) when nothing's
+    loaded yet - an empty string here would render as literally nothing,
+    which is why the video panel used to disappear entirely instead of
+    sitting there empty the way image_box always does."""
     if not video_id:
-        return ""
+        return (
+            '<div style="height:320px; display:flex; align-items:center; '
+            'justify-content:center; border-radius:var(--radius-lg); '
+            'background:var(--block-background-fill); '
+            'border:1px solid var(--border-color-primary); '
+            'color:var(--body-text-color-subdued); font-size:0.9em;">'
+            "No video loaded</div>"
+        )
     return (
-        f'<iframe width="100%" height="230" '
+        f'<iframe width="100%" height="320" style="border-radius:var(--radius-lg);" '
         f'src="https://www.youtube.com/embed/{video_id}" '
         f'title="YouTube video player" frameborder="0" '
         f'allow="accelerometer; autoplay; clipboard-write; encrypted-media; '
@@ -269,10 +279,10 @@ def build_app():
         chat_list = gr.State([])
         chat_no = gr.State(None)
         rename_target = gr.State(None)  # id of the chat currently being renamed, if any
-        source = gr.State("openRouter")
-        model_name = gr.State("openrouter/free")
+        source = gr.State("openai")
+        model_name = gr.State(DEFAULT_MODEL_ALIASES["openai"])
         temperature = gr.State(0.0)
-        use_tools = gr.State(False)
+        use_tools = gr.State(True)
         speak_enabled = gr.State(False)
 
         with gr.Row():
@@ -330,7 +340,7 @@ def build_app():
                 with gr.Row():
                     image_box = gr.Image(height=320, interactive=False, show_label=False, label="Generated image")
                     audio_box = gr.Audio(autoplay=True, label="Voice reply")
-                    video_box = gr.HTML(label="Video")
+                    video_box = gr.HTML(_video_html(None), label="Video", min_height=320, container=True)
 
                 with gr.Group():
                     user_input = gr.Textbox(placeholder="Enter your prompt", show_label=False, scale=8)
@@ -351,12 +361,16 @@ def build_app():
 
             with gr.Column(scale=1):
                 with gr.Accordion("Adv_settings"):
-                    source_selection = gr.Dropdown(choices=["openRouter", "gemini", "ollama", "openai"], label="Select source")
+                    source_selection = gr.Dropdown(
+                        choices=["openRouter", "gemini", "ollama", "openai"], value="openai", label="Select source"
+                    )
 
                     temperature_select = gr.Slider(0, 2, value=0, step=0.1, label="temp_slider")
                     temperature_select.change(fn=lambda t: t, inputs=[temperature_select], outputs=[temperature])
 
-                    model_name_input = gr.Textbox(placeholder="Enter model name", value="openrouter/free", label="Enter Model name")
+                    model_name_input = gr.Textbox(
+                        placeholder="Enter model name", value=DEFAULT_MODEL_ALIASES["openai"], label="Enter Model name"
+                    )
                     model_name_input.submit(fn=lambda m: m, inputs=[model_name_input], outputs=[model_name])
 
                     # Declared after model_name_input so it can appear in this
@@ -367,7 +381,9 @@ def build_app():
                         outputs=[source, model_name, model_name_input],
                     )
 
-                    tools_checkbox = gr.Checkbox(label="Enable tools (image, video, web search, document search)", value=False)
+                    tools_checkbox = gr.Checkbox(
+                        label="Enable tools (image, video, web search, document search)", value=True
+                    )
                     tools_checkbox.change(fn=lambda t: t, inputs=[tools_checkbox], outputs=[use_tools])
 
                     speak_checkbox = gr.Checkbox(label="Speak replies aloud (TTS)", value=False)
